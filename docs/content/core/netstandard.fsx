@@ -55,6 +55,32 @@ Corresponding files goes to root bin paths, e.g.: \bin\netstandard2.0
 If you plan to run Microsoft SQL Server, you need a dependency to System.Data.SqlClient and a post-build task to
 copy correct dll from under `System.Data.SqlClient\runtimes\...\` to your execution folder.
 
+There is a know error when you try to opertate a CRUD operation with the Microsoft Sql Server on .NET Core.
+You will run into a "Enlisting in Ambiant transactions is not supported yet" error.
+.NET Core is not supporting ambiant transaction yet. 
+Luckily you can control the transaction in SQLProvider like that:
+*)
+
+open FSharp.Data.Sql.Transactions
+
+let ctx = 
+    db.GetDataContext(
+         { Timeout = TimeSpan.MaxValue;
+            IsolationLevel = Transactions.IsolationLevel.DontCreateTransaction
+         }:FSharp.Data.Sql.Transactions.TransactionOptions)
+
+(**
+    To parse in your runtimeconnection string you can do it like that:
+*)
+
+let ctx2 = 
+    db.GetDataContext(
+         runtimeconnectionString,
+         { Timeout = TimeSpan.MaxValue;
+            IsolationLevel = Transactions.IsolationLevel.DontCreateTransaction
+         })
+
+(**        
 #### MySql
 
 MySQL is using MySQLConnector.
