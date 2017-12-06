@@ -1,7 +1,7 @@
 ﻿(*** hide ***)
 #I @"../../files/sqlite"
 (*** hide ***)
-#I "../../../bin"
+#I "../../../bin/net451"
 (*** hide ***)
 let connectionString =
     "Data Source=" + __SOURCE_DIRECTORY__ + @"\northwindEF.db;Version=3"
@@ -18,16 +18,27 @@ open FSharp.Data.Sql
 
 ## Parameters
 
+### DatabaseVendor
+
+From the `FSharp.Data.Sql.Common.DatabaseProviderTypes` enumeration. For PostgreSQL,
+use `Common.DatabaseProviderTypes.POSTGRESQL`.
+
+*)
+
+let [<Literal>] dbVendor = Common.DatabaseProviderTypes.POSTGRESQL
+
+(**
+
 ### ConnectionString
 
 Basic connection string used to connect to PostgreSQL instance; typical 
 connection strings for the driver apply here. See
-[PostgreSQL Connecting Strings Documentation](https://github.com/npgsql/Npgsql/wiki/User-Manual)
+[PostgreSQL Connecting Strings Documentation](http://www.npgsql.org/doc/connection-string-parameters.html)
 for a complete list of connection string options.
 
 *)
 
-let [<Literal>] connString = "Server=localhost;Database=test;User Id=test;Password=test"
+let [<Literal>] connString = "Host=localhost;Database=test;Username=test;Password=test"
 
 (**
 ### ConnectionStringName
@@ -41,16 +52,6 @@ connectionString key/value pair stored in App.config (TODO: confirm file name).
 let [<Literal>] connexStringName = "DefaultConnectionString"
 
 (**
-### DatabaseVendor
-
-From the `FSharp.Data.Sql.Common.DatabaseProviderTypes` enumeration. For PostgreSQL,
-use `Common.DatabaseProviderTypes.POSTGRESQL`.
-
-*)
-
-let [<Literal>] dbVendor = Common.DatabaseProviderTypes.POSTGRESQL
-
-(**
 ### Resolution Path
 
 Path to search for assemblies containing database vendor specific connections 
@@ -58,7 +59,7 @@ and custom types. Type the path where `Npgsql.Data.dll` is stored.
 
 *)
 
-let [<Literal>] resPath = @"C:\Projects\Libs\Npgsql\"
+let [<Literal>] resPath = @"C:\Projects\Libs\Npgsql"
 
 (**
 ### IndividualsAmount
@@ -81,10 +82,11 @@ if it is null in the database.
 
 let [<Literal>] useOptTypes  = true
 
-let sql =
+type sql =
     SqlDataProvider<
-        connString,
         dbVendor,
+        connString,
+        "",         //ConnectionNameString can be left empty 
         resPath,
         indivAmount,
         useOptTypes>

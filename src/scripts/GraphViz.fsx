@@ -1,5 +1,5 @@
-﻿#r @"..\..\bin\FSharp.Data.SqlProvider.dll" 
-//#r @"F:\dropbox\SqlProvider\bin\Debug\FSharp.Data.SqlProvider.dll"
+﻿#r @"..\..\bin\net451\FSharp.Data.SqlProvider.dll" 
+//#r @"F:\dropbox\SqlProvider\bin\net451\Debug\FSharp.Data.SqlProvider.dll"
 module GraphViz  =
 //http://www.graphviz.org/doc/info/attrs.html#d:arrowtail
 // script for helping to visualise crazy LINQ expression tress with graphviz
@@ -225,7 +225,7 @@ module GraphViz  =
             let pName = eval ue.Operand
             ~~~ (sprintf "%s:0 -> %s:0;" name pName)
             name
-         | _ ->  "UnrecognisedNode" + (nextIndex())  + e.NodeType.ToString()
+         | _ ->  "UnrecognisedNode " + (nextIndex())  + e.NodeType.ToString()
 
       eval e |> ignore
       ~~ "}"

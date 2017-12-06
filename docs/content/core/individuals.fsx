@@ -1,9 +1,9 @@
 (*** hide ***)
 #I "../../files/sqlite"
 (*** hide ***)
-#I "../../../bin"
+#I "../../../bin/net451"
 (*** hide ***)
-#r @"../../../bin/FSharp.Data.SqlProvider.dll"
+#r @"../../../bin/net451/FSharp.Data.SqlProvider.dll"
 
 (*** hide ***)
 [<Literal>]
@@ -11,7 +11,7 @@ let connectionString = "Data Source=" + __SOURCE_DIRECTORY__ + @"/../../../tests
 
 (*** hide ***)
 [<Literal>]
-let resolutionPath = __SOURCE_DIRECTORY__ + @"/../../files/sqlite"
+let resolutionPath = __SOURCE_DIRECTORY__ + @"/../../../tests/SqlProvider.Tests/libs"
 
 (**
 # Individuals

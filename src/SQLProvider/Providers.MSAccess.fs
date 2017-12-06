@@ -1,6 +1,7 @@
 ﻿namespace FSharp.Data.Sql.Providers
 
 open System
+open System.Collections.Concurrent
 open System.Collections.Generic
 open System.Data
 open System.Data.OleDb
@@ -11,17 +12,81 @@ open FSharp.Data.Sql.Schema
 open FSharp.Data.Sql.Common
 
 type internal MSAccessProvider() =
-    let pkLookup =     new Dictionary<string,string>()
-    let tableLookup =  new Dictionary<string,Table>()
-    let relationshipLookup = new Dictionary<string,Relationship list * Relationship list>()
-    let columnLookup = new Dictionary<string,Column list>()
-     
+    let pkLookup = new ConcurrentDictionary<string,string list>()
+    let tableLookup = new ConcurrentDictionary<string,Table>()
+    let relationshipLookup = new ConcurrentDictionary<string,Relationship list * Relationship list>()
+    let columnLookup = new ConcurrentDictionary<string,ColumnLookup>()
+
     let mutable typeMappings = []
     let mutable findClrType : (string -> TypeMapping option)  = fun _ -> failwith "!"
     let mutable findDbType : (string -> TypeMapping option)  = fun _ -> failwith "!"
     let mutable findDbTypeByEnum : (int -> TypeMapping option)  = fun _ -> failwith "!"
 
+    let rec fieldNotation (al:alias) (c:SqlColumnType) =
+        let colSprint =
+            match String.IsNullOrEmpty(al) with
+            | true -> sprintf "[%s]"
+            | false -> sprintf "[%s].[%s]" al
+        match c with
+        // Custom database spesific overrides for canonical function:
+        | SqlColumnType.CanonicalOperation(cf,col) ->
+            let column = fieldNotation al col
+            match cf with
+            // String functions
+            | Replace(SqlStr(searchItm),SqlStrCol(al2, col2)) -> sprintf "REPLACE(%s,'%s',%s)" column searchItm (fieldNotation al2 col2)
+            | Replace(SqlStrCol(al2, col2),SqlStr(toItm)) -> sprintf "REPLACE(%s,%s,'%s')" column (fieldNotation al2 col2) toItm
+            | Replace(SqlStrCol(al2, col2),SqlStrCol(al3, col3)) -> sprintf "REPLACE(%s,%s,%s)" column (fieldNotation al2 col2) (fieldNotation al3 col3)
+            | Substring(SqlInt startPos) -> sprintf "Mid(%s, %i)" column startPos
+            | Substring(SqlIntCol(al2, col2)) -> sprintf "Mid(%s, %s)" column (fieldNotation al2 col2)
+            | SubstringWithLength(SqlInt startPos,SqlInt strLen) -> sprintf "Mid(%s, %i, %i)" column startPos strLen
+            | SubstringWithLength(SqlInt startPos,SqlIntCol(al2, col2)) -> sprintf "Mid(%s, %i, %s)" column startPos (fieldNotation al2 col2)
+            | SubstringWithLength(SqlIntCol(al2, col2),SqlInt strLen) -> sprintf "Mid(%s, %s, %i)" column (fieldNotation al2 col2) strLen
+            | SubstringWithLength(SqlIntCol(al2, col2),SqlIntCol(al3, col3)) -> sprintf "Mid(%s, %s, %s)" column (fieldNotation al2 col2) (fieldNotation al3 col3)
+            | Trim -> sprintf "Trim(%s)" column
+            | Length -> sprintf "Len(%s)" column
+            | IndexOf(SqlStr search) -> sprintf "InStr('%s',%s)" search column
+            | IndexOf(SqlStrCol(al2, col2)) -> sprintf "InStr(%s,%s)" (fieldNotation al2 col2) column
+            | IndexOfStart(SqlStr(search),(SqlInt startPos)) -> sprintf "InStr(%d,'%s',%s)" startPos search column
+            | IndexOfStart(SqlStr(search),SqlIntCol(al2, col2)) -> sprintf "InStr(%s,'%s',%s)" (fieldNotation al2 col2) search column
+            | IndexOfStart(SqlStrCol(al2, col2),(SqlInt startPos)) -> sprintf "InStr(%d,%s,%s)" startPos (fieldNotation al2 col2) column
+            | IndexOfStart(SqlStrCol(al2, col2),SqlIntCol(al3, col3)) -> sprintf "InStr(%s,%s,%s)" (fieldNotation al3 col3) (fieldNotation al2 col2) column
+            | ToUpper -> sprintf "UCase(%s)" column
+            | ToLower -> sprintf "LCase(%s)" column
+            // Date functions
+            | Date -> sprintf "DateValue(Format(%s, \"yyyy-mm-dd\")" column
+            | Year -> sprintf "Year(%s)" column
+            | Month -> sprintf "Month(%s)" column
+            | Day -> sprintf "Day(%s)" column
+            | Hour -> sprintf "Hour(%s)" column
+            | Minute -> sprintf "Minute(%s)" column
+            | Second -> sprintf "Second(%s)" column
+            | AddYears(SqlInt x) -> sprintf "DateAdd(\"yyyy\", %d, %s)" x column
+            | AddYears(SqlIntCol(al2, col2)) -> sprintf "DateAdd(\"yyyy\", %s, %s)" (fieldNotation al2 col2) column
+            | AddMonths x -> sprintf "DateAdd(\"m\", %d, %s)" x column
+            | AddDays(SqlFloat x) -> sprintf "DateAdd(\"d\", %f, %s)" x column // SQL ignores decimal part :-(
+            | AddDays(SqlNumCol(al2, col2)) -> sprintf "DateAdd(\"d\", %s, %s)" (fieldNotation al2 col2) column
+            | AddHours x -> sprintf "DateAdd(\"h\", %f, %s)" x column
+            | AddMinutes(SqlFloat x) -> sprintf "DateAdd(\"n\", %f, %s)" x column
+            | AddMinutes(SqlNumCol(al2, col2)) -> sprintf "DateAdd(\"n\", %s, %s)" (fieldNotation al2 col2) column
+            | AddSeconds x -> sprintf "DateAdd(\"s\", %f, %s)" x column
+            // Math functions
+            | Truncate -> sprintf "Fix(%s)" column
+            | Ceil -> sprintf "Fix(%s)+1" column
+            | Floor -> sprintf "Int(%s)" column
+            | BasicMathOfColumns(o, a, c) -> sprintf "(%s %s %s)" column (o.Replace("||", "&")) (fieldNotation a c)
+            | BasicMath(o, par) when (par :? String || par :? Char) -> sprintf "(%s %s '%O')" column (o.Replace("||", "&")) par
+            | _ -> Utilities.genericFieldNotation (fieldNotation al) colSprint c
+        | _ -> Utilities.genericFieldNotation (fieldNotation al) colSprint c
+
+    let fieldNotationAlias(al:alias,col:SqlColumnType) =
+        let aliasSprint =
+            match String.IsNullOrEmpty(al) with
+            | true -> sprintf "[%s]"
+            | false -> sprintf "[%s_%s]" al
+        Utilities.genericAliasNotation aliasSprint col
+
     let createTypeMappings (con:OleDbConnection) =
+        if con.State <> ConnectionState.Open then con.Open()
         let dt = con.GetSchema("DataTypes")
 
         let getDbType(providerType:int) =
@@ -30,7 +95,7 @@ type internal MSAccessProvider() =
             p.DbType
 
         let getClrType (input:string) = Type.GetType(input).ToString()
-        let mappings =             
+        let mappings =
             [
                 for r in dt.Rows do
                     let clrType = getClrType (string r.["DataType"])
@@ -38,136 +103,295 @@ type internal MSAccessProvider() =
                     let providerType = unbox<int> r.["ProviderDbType"]
                     let dbType = getDbType providerType
                     yield { ProviderTypeName = Some oleDbType; ClrType = clrType; DbType = dbType; ProviderType = Some providerType; }
+                yield { ProviderTypeName = Some "cursor"; ClrType = (typeof<SqlEntity[]>).ToString(); DbType = DbType.Object; ProviderType = None; }
             ]
-        
+
         let clrMappings =
             mappings
             |> List.map (fun m -> m.ClrType, m)
             |> Map.ofList
 
-        let dbMappings = 
+        let dbMappings =
             mappings
+            |> List.filter (fun m -> m.ProviderTypeName.IsSome)
             |> List.map (fun m -> m.ProviderTypeName.Value, m)
             |> Map.ofList
-        
+
         let enumMappings =
             mappings
-            |> List.map (fun m -> m.ProviderType.Value, m)            
+            |> List.filter (fun m -> m.ProviderType.IsSome)
+            |> List.map (fun m -> m.ProviderType.Value, m)
             |> Map.ofList
 
         typeMappings <- mappings
         findClrType <- clrMappings.TryFind
         findDbType <- dbMappings.TryFind
         findDbTypeByEnum <- enumMappings.TryFind
-    
+
+    let createInsertCommand (con:IDbConnection) (sb:Text.StringBuilder) (entity:SqlEntity) =
+        let (~~) (t:string) = sb.Append t |> ignore
+
+        let cmd = new OleDbCommand()
+        cmd.Connection <- con :?> OleDbConnection
+
+        let columnNames, values =
+            (([],0),entity.ColumnValues)
+            ||> Seq.fold(fun (out,i) (k,v) ->
+                let name = sprintf "@param%i" i
+                let p = OleDbParameter(name,v)
+                (k,p)::out,i+1)
+            |> fun (x,_)-> x
+            |> List.rev
+            |> List.toArray
+            |> Array.unzip
+
+        sb.Clear() |> ignore
+        ~~(sprintf "INSERT INTO [%s] (%s) VALUES (%s)"//; SELECT @@IDENTITY;"
+            entity.Table.Name
+            (String.Join(",", columnNames))
+            (String.Join(",", values |> Array.map(fun p -> p.ParameterName))))
+        cmd.Parameters.AddRange(values)
+        cmd.CommandText <- sb.ToString()
+        cmd
+
+    let createUpdateCommand (con:IDbConnection) (sb:Text.StringBuilder) (entity:SqlEntity) (changedColumns: string list) =
+        let (~~) (t:string) = sb.Append t |> ignore
+        let cmd = new OleDbCommand()
+        cmd.Connection <- con :?> OleDbConnection
+        let pk =
+            if not(pkLookup.ContainsKey entity.Table.FullName) then
+                failwith("Can't update entity: Table doesn't have a primary key: " + entity.Table.FullName)
+            pkLookup.[entity.Table.FullName]
+        sb.Clear() |> ignore
+
+        match pk with
+        | [x] when changedColumns |> List.exists ((=)x)
+            -> failwith "Error - you cannot change the primary key of an entity."
+        | _ -> ()
+
+        let pkValues =
+            match entity.GetPkColumnOption<obj> pk with
+            | [] -> failwith ("Error - you cannot update an entity that does not have a primary key. (" + entity.Table.FullName + ")")
+            | v -> v
+
+        let data =
+            (([],0),changedColumns)
+            ||> List.fold(fun (out,i) col ->
+                let name = sprintf "@param%i" i
+                let p =
+                    match entity.GetColumnOption<obj> col with
+                    | Some v -> OleDbParameter(name,v)
+                    | None -> OleDbParameter(name,DBNull.Value)
+                (col,p)::out,i+1)
+            |> fun (x,_)-> x
+            |> List.rev
+            |> List.toArray
+
+        match pk with
+        | [] -> ()
+        | ks -> 
+            ~~(sprintf "UPDATE [%s] SET %s WHERE "
+                (entity.Table.Name.Replace("\"", ""))
+                (String.Join(",", data |> Array.map(fun (c,p) -> sprintf "%s = %s" c p.ParameterName ) )))
+            ~~(String.Join(" AND ", ks |> List.mapi(fun i k -> (sprintf "%s = @pk%i" k i))))
+
+        cmd.Parameters.AddRange(data |> Array.map snd)
+        pkValues |> List.iteri(fun i pkValue ->
+            let pkParam = OleDbParameter(("@pk"+i.ToString()), pkValue)
+            cmd.Parameters.Add pkParam |> ignore)
+
+        cmd.CommandText <- sb.ToString()
+        cmd
+
+    let createDeleteCommand (con:IDbConnection) (sb:Text.StringBuilder) (entity:SqlEntity) =
+        let (~~) (t:string) = sb.Append t |> ignore
+        let cmd = new OleDbCommand()
+        cmd.Connection <- con :?> OleDbConnection
+        sb.Clear() |> ignore
+        let haspk = pkLookup.ContainsKey(entity.Table.FullName)
+        let pk = if haspk then pkLookup.[entity.Table.FullName] else []
+        sb.Clear() |> ignore
+        let pkValues =
+            match entity.GetPkColumnOption<obj> pk with
+            | [] -> failwith ("Error - you cannot delete an entity that does not have a primary key. (" + entity.Table.FullName + ")")
+            | v -> v
+
+        pkValues |> List.iteri(fun i pkValue ->
+            cmd.Parameters.AddWithValue(("@id"+i.ToString()),pkValue) |> ignore)
+
+        match pk with
+        | [] -> ()
+        | ks -> 
+            ~~(sprintf "DELETE FROM [%s] WHERE " (entity.Table.Name.Replace("\"", "")))
+            ~~(String.Join(" AND ", ks |> List.mapi(fun i k -> (sprintf "%s = @id%i" k i))))
+
+        cmd.CommandText <- sb.ToString()
+        cmd
+
     interface ISqlProvider with
-        member __.CreateConnection(connectionString) = upcast new OleDbConnection(connectionString)
+        member __.GetTableDescription(con,tableName) = 
+            let t = tableName.Substring(tableName.LastIndexOf(".")+1) 
+            let desc = 
+                (con:?>OleDbConnection).GetSchema("Tables",[|null;null;t.Replace("\"", "")|]).AsEnumerable() 
+                |> Seq.map(fun row ->row.["DESCRIPTION"].ToString()) |> Seq.toList
+            match desc with
+            | [x] -> x
+            | _ -> ""
+
+        member __.GetColumnDescription(con,tableName,columnName) = 
+            let t = tableName.Substring(tableName.LastIndexOf(".")+1) 
+            let desc = 
+                (con:?>OleDbConnection).GetSchema("Columns",[|null;null;t.Replace("\"", "");columnName|]).AsEnumerable() 
+                |> Seq.map(fun row ->row.["DESCRIPTION"].ToString())
+                |> Seq.toList
+            match desc with
+            | [x] -> x
+            | _ -> ""
+
+        member __.CreateConnection(connectionString) = 
+            // Access connections shouldn't ever be closed as that leads to Unspecified Error.
+            let con = new OleDbConnection(connectionString)
+            upcast con
+
         member __.CreateCommand(connection,commandText) = upcast new OleDbCommand(commandText,connection:?>OleDbConnection)
-        member __.CreateCommandParameter(param, value) = 
-            let p = OleDbParameter(param.Name,value)            
+
+        member __.CreateCommandParameter(param, value) =
+            let p = OleDbParameter(param.Name,value)
             p.DbType <- param.TypeMapping.DbType
             p.Direction <- param.Direction
             Option.iter (fun l -> p.Size <- l) param.Length
             upcast p
-        member __.ExecuteSprocCommand(com,definition,retCols,values) =  raise(NotImplementedException())
-        member __.CreateTypeMappings(con) = createTypeMappings (con:?>OleDbConnection)     
-        member __.GetTables(con,cs) =
+
+        member __.ExecuteSprocCommand(_,_,_,_) =  raise(NotImplementedException())
+        member __.ExecuteSprocCommandAsync(_,_,_,_) =  raise(NotImplementedException())
+        member __.CreateTypeMappings(con) = createTypeMappings (con:?>OleDbConnection)
+
+        member __.GetTables(con,_) =
             if con.State <> ConnectionState.Open then con.Open()
             let con = con:?>OleDbConnection
-            let tables = 
+            let tables =
                 con.GetSchema("Tables").AsEnumerable()
-                |> Seq.filter (fun row -> ["TABLE";"VIEW";"LINK"] |> List.exists (fun typ -> typ = row.["TABLE_TYPE"].ToString())) // = "TABLE" || row.["TABLE_TYPE"].ToString() = "VIEW" || row.["TABLE_TYPE"].ToString() = "LINK")  //The text file specification 'A Link Specification' does not exist. You cannot import, export, or link using the specification.                                                                                                                       
+                |> Seq.filter (fun row -> ["TABLE";"VIEW";"LINK"] |> List.exists (fun typ -> typ = row.["TABLE_TYPE"].ToString())) // = "TABLE" || row.["TABLE_TYPE"].ToString() = "VIEW" || row.["TABLE_TYPE"].ToString() = "LINK")  //The text file specification 'A Link Specification' does not exist. You cannot import, export, or link using the specification.
                 |> Seq.map (fun row -> let table ={ Schema = Path.GetFileNameWithoutExtension(con.DataSource); Name = row.["TABLE_NAME"].ToString() ; Type=row.["TABLE_TYPE"].ToString() }
-                                       if tableLookup.ContainsKey table.FullName = false then tableLookup.Add(table.FullName,table)
-                                       table)
+                                       tableLookup.GetOrAdd(table.FullName,table)
+                                       )
                 |> List.ofSeq
             tables
 
-        member __.GetPrimaryKey(table) = 
+        member __.GetPrimaryKey(table) =
             match pkLookup.TryGetValue table.FullName with
-            | true, v -> Some v
+            | true, [v] -> Some v
             | _ -> None
-        member __.GetColumns(con,table) = 
+
+        member __.GetColumns(con,table) =
             match columnLookup.TryGetValue table.FullName with
-            | (true,data) -> data
-            | _ -> 
-               if con.State <> ConnectionState.Open then con.Open()
-               let pks = 
-                    (con:?>OleDbConnection).GetSchema("Indexes",[|null;null;null;null;table.Name|]).AsEnumerable()
+            | (true,data) when data.Count > 0 -> data
+            | _ ->
+                if con.State <> ConnectionState.Open then con.Open()
+                let pks =
+                    (con:?>OleDbConnection).GetSchema("Indexes",[|null;null;null;null;table.Name.Replace("\"", "")|]).AsEnumerable()
                     |> Seq.filter (fun idx ->  bool.Parse(idx.["PRIMARY_KEY"].ToString()))
                     |> Seq.map (fun idx -> idx.["COLUMN_NAME"].ToString())
                     |> Seq.toList
 
-               let columns = 
-                    (con:?>OleDbConnection).GetSchema("Columns",[|null;null;table.Name;null|]).AsEnumerable()
-                    |> Seq.map (fun row -> let dt = row.["DATA_TYPE"].ToString()
-                                           match findDbType dt with
-                                           |Some(m) ->
-                                                 let col = 
-                                                    {Column.Name = row.["COLUMN_NAME"].ToString();
-                                                     TypeMapping = m
-                                                     IsPrimarKey = pks |> List.exists (fun idx -> idx = row.["COLUMN_NAME"].ToString())
-                                                     IsNullable = bool.Parse(row.["IS_NULLABLE"].ToString()) }
-                                                 col
-                                           |_ -> failwith "failed to map datatypes") |> List.ofSeq
-              
-              // only add to PK lookup if it's a single pk - no support for composite keys yet
-               match pks with
-               | pk::[] -> pkLookup.Add(table.FullName, pk) 
-               | _ -> ()
+                let columns =
+                    (con:?>OleDbConnection).GetSchema("Columns",[|null;null;table.Name.Replace("\"", "");null|]).AsEnumerable()
+                    |> Seq.map (fun row ->
+                        match row.["DATA_TYPE"].ToString() |> findDbType with
+                        |Some(m) ->
+                            let col =
+                                { Column.Name = row.["COLUMN_NAME"].ToString();
+                                  TypeMapping = m
+                                  IsPrimaryKey = pks |> List.exists (fun idx -> idx = row.["COLUMN_NAME"].ToString())
+                                  IsNullable = bool.Parse(row.["IS_NULLABLE"].ToString())
+                                  TypeInfo = 
+                                    try 
+                                        let ti = 
+                                            if row.IsNull("CHARACTER_MAXIMUM_LENGTH") then ""
+                                            else row.["CHARACTER_MAXIMUM_LENGTH"].ToString()
+                                        if String.IsNullOrEmpty ti then None
+                                        else Some ("Max length: " + ti)
+                                    with :? KeyNotFoundException -> None
+                                }
+                            (col.Name,col)
+                        |_ -> failwith "failed to map datatypes")
+                    |> Map.ofSeq
 
-               columnLookup.Add(table.FullName,columns)
-               columns
+                // only add to PK lookup if it's a single pk - no support for composite keys yet
+                match pks with
+                | [] -> ()
+                | c -> 
+                    pkLookup.AddOrUpdate(table.FullName, (c |> List.sort), fun key old -> 
+                                match pks.Length with 0 -> old | _ -> (c |> List.sort)) |> ignore
+                columnLookup.AddOrUpdate(table.FullName, columns, fun x old -> match columns.Count with 0 -> old | x -> columns)
+
+
         member __.GetRelationships(con,table) =
-            if con.State <> ConnectionState.Open then con.Open() 
-            let rels = 
+          relationshipLookup.GetOrAdd(table.FullName, fun name ->
+            if con.State <> ConnectionState.Open then con.Open()
+            let rels =
                 (con:?>OleDbConnection).GetOleDbSchemaTable(OleDbSchemaGuid.Foreign_Keys,[|null|]).AsEnumerable()
             let children = rels |> Seq.filter (fun r -> r.["PK_TABLE_NAME"].ToString() = table.Name)
                                 |> Seq.map    (fun r -> let pktableName = table.FullName
                                                         let fktableName = sprintf "[%s].[%s]" table.Schema  (r.["FK_TABLE_NAME"].ToString())
-                                                        let name = sprintf "FK_%s_%s" (r.["FK_TABLE_NAME"].ToString()) (r.["PK_TABLE_NAME"].ToString()) 
-                                                        {Name=name;PrimaryTable = pktableName;PrimaryKey=r.["PK_COLUMN_NAME"].ToString();ForeignTable=fktableName;ForeignKey=r.["FK_COLUMN_NAME"].ToString()})    
+                                                        let name = sprintf "FK_%s_%s" (r.["FK_TABLE_NAME"].ToString()) (r.["PK_TABLE_NAME"].ToString())
+                                                        {Name=name;PrimaryTable = pktableName;PrimaryKey=r.["PK_COLUMN_NAME"].ToString();ForeignTable=fktableName;ForeignKey=r.["FK_COLUMN_NAME"].ToString()})
                                 |> List.ofSeq
             let parents  = rels |> Seq.filter (fun r -> r.["FK_TABLE_NAME"].ToString() = table.Name)
                                 |> Seq.map    (fun r -> let pktableName = sprintf "[%s].[%s]" table.Schema  (r.["PK_TABLE_NAME"].ToString())
                                                         let fktableName = table.FullName
-                                                        let name = sprintf "FK_%s_%s" (r.["FK_TABLE_NAME"].ToString()) (r.["PK_TABLE_NAME"].ToString()) 
-                                                        {Name=name;PrimaryTable = pktableName;PrimaryKey=r.["PK_COLUMN_NAME"].ToString();ForeignTable=fktableName;ForeignKey=r.["FK_COLUMN_NAME"].ToString()})    
+                                                        let name = sprintf "FK_%s_%s" (r.["FK_TABLE_NAME"].ToString()) (r.["PK_TABLE_NAME"].ToString())
+                                                        {Name=name;PrimaryTable = pktableName;PrimaryKey=r.["PK_COLUMN_NAME"].ToString();ForeignTable=fktableName;ForeignKey=r.["FK_COLUMN_NAME"].ToString()})
                                 |> List.ofSeq
-            relationshipLookup.Add(table.FullName,(children,parents))
-            (children,parents)
-        member __.GetSprocs(con) = 
-            []
+            (children,parents))
 
-        member this.GetIndividualsQueryText(table,amount) = sprintf "SELECT TOP %i * FROM [%s]" amount table.Name
-                                                            
-        member this.GetIndividualQueryText(table,column) = sprintf "SELECT * FROM [%s] WHERE [%s] = @id" table.Name column
-        
-        member this.GenerateQueryText(sqlQuery,baseAlias,baseTable,projectionColumns) = 
+        member __.GetSprocs(_) = []
+        member __.GetIndividualsQueryText(table,amount) = sprintf "SELECT TOP %i * FROM [%s]" amount table.Name
+        member __.GetIndividualQueryText(table,column) = sprintf "SELECT * FROM [%s] WHERE [%s] = @id" table.Name column
+
+        member __.GenerateQueryText(sqlQuery,baseAlias,baseTable,projectionColumns,isDeleteScript) =
             let sb = System.Text.StringBuilder()
             let parameters = ResizeArray<_>()
             let (~~) (t:string) = sb.Append t |> ignore
-    
+
             let getTable x =
                 match sqlQuery.Aliases.TryFind x with
                 | Some(a) -> a
                 | None -> baseTable
 
             let singleEntity = sqlQuery.Aliases.Count = 0
-            
+
             // first build  the select statement, this is easy ...
-            let columns = 
+            let selectcolumns =
+                if projectionColumns |> Seq.isEmpty then "1" else
                 String.Join(",",
                     [|for KeyValue(k,v) in projectionColumns do
+                        let cols = (getTable k).FullName
+                        let k = if k <> "" then k elif baseAlias <> "" then baseAlias else baseTable.Name
                         if v.Count = 0 then   // if no columns exist in the projection then get everything
-                            for col in columnLookup.[(getTable k).FullName] |> List.map(fun c -> c.Name) do
+                            for col in columnLookup.[cols] |> Seq.map (fun c -> c.Key) do
                                 if singleEntity then yield sprintf "[%s].[%s] as [%s]" k col col
                                 else yield sprintf "[%s].[%s] as [%s_%s]" k col k col
                         else
-                            for col in v do 
+                            for col in v do
                                 if singleEntity then yield sprintf "[%s].[%s] as [%s]" k col col
                                 else yield sprintf "[%s].[%s] as [%s_%s]" k col k col|]) // F# makes this so easy :)
-        
+
+            // Create sumBy, minBy, maxBy, ... field columns
+            let columns =
+                let extracolumns =
+                    match sqlQuery.Grouping with
+                    | [] -> FSharp.Data.Sql.Common.Utilities.parseAggregates fieldNotation fieldNotationAlias sqlQuery.AggregateOp
+                    | g  -> 
+                        let keys = g |> List.map(fst) |> List.concat |> List.map(fun (a,c) -> (fieldNotation a c))
+                        let aggs = g |> List.map(snd) |> List.concat
+                        let res2 = FSharp.Data.Sql.Common.Utilities.parseAggregates fieldNotation fieldNotationAlias aggs |> List.toSeq
+                        [String.Join(", ", keys) + (match aggs with [] -> "" | _ -> ", ") + String.Join(", ", res2)] 
+                match extracolumns with
+                | [] when String.IsNullOrEmpty(selectcolumns) -> "*"
+                | [] -> selectcolumns
+                | h::t -> h
+
             // next up is the filter expressions
             // make this nicer later.. just try and get the damn thing to work properly (well, at all) for now :D
             // NOTE: really need to assign the parameters their correct SQL types
@@ -182,15 +406,17 @@ type internal MSAccessProvider() =
                            | :? DateTime as dt -> dt.ToOADate() |> box
                            | _           -> value
                 OleDbParameter(paramName,valu):> IDbDataParameter
-            let rec filterBuilder = function 
+            let rec filterBuilder = function
                 | [] -> ()
                 | (cond::conds) ->
                     let build op preds (rest:Condition list option) =
                         ~~ "("
                         preds |> List.iteri( fun i (alias,col,operator,data) ->
-                                let extractData data = 
+                                let column = fieldNotation alias col
+                                let extractData data =
                                      match data with
-                                     | Some(x) when (box x :? obj array) -> 
+                                     | Some(x) when (box x :? System.Linq.IQueryable) -> [||]
+                                     | Some(x) when (box x :? obj array) ->
                                          // in and not in operators pass an array
                                          let strings = box x :?> obj array
                                          strings |> Array.map createParam
@@ -201,21 +427,35 @@ type internal MSAccessProvider() =
                                 let paras = extractData data
                                 ~~(sprintf "%s%s" prefix <|
                                     match operator with
-                                    | FSharp.Data.Sql.IsNull -> (sprintf "[%s].[%s] IS NULL") alias col 
-                                    | FSharp.Data.Sql.NotNull -> (sprintf "[%s].[%s] IS NOT NULL") alias col 
-                                    | FSharp.Data.Sql.In ->                                     
+                                    | FSharp.Data.Sql.IsNull -> sprintf "%s IS NULL" column
+                                    | FSharp.Data.Sql.NotNull -> sprintf "%s IS NOT NULL" column
+                                    | FSharp.Data.Sql.In ->
                                         let text = String.Join(",",paras |> Array.map (fun p -> p.ParameterName))
                                         Array.iter parameters.Add paras
-                                        (sprintf "[%s].[%s] IN (%s)") alias col text
-                                    | FSharp.Data.Sql.NotIn ->                                    
+                                        sprintf "%s IN (%s)" column text
+                                    | FSharp.Data.Sql.NestedIn when data.IsSome ->
+                                        let innersql, innerpars = data.Value |> box :?> string * IDbDataParameter[]
+                                        Array.iter parameters.Add innerpars
+                                        sprintf "%s IN (%s)" column innersql
+                                    | FSharp.Data.Sql.NotIn ->
                                         let text = String.Join(",",paras |> Array.map (fun p -> p.ParameterName))
                                         Array.iter parameters.Add paras
-                                        (sprintf "[%s].[%s] NOT IN (%s)") alias col text 
-                                    | _ -> 
-                                        parameters.Add paras.[0]
-                                        (sprintf "[%s].[%s]%s %s") alias col 
-                                         (operator.ToString()) paras.[0].ParameterName)
-                        )
+                                        sprintf "%s NOT IN (%s)" column text
+                                    | FSharp.Data.Sql.NestedNotIn when data.IsSome ->
+                                        let innersql, innerpars = data.Value |> box :?> string * IDbDataParameter[]
+                                        Array.iter parameters.Add innerpars
+                                        sprintf "%s NOT IN (%s)" column innersql
+                                    | _ ->
+                                        let aliasformat = sprintf "%s %s %s" column
+                                        match data with 
+                                        | Some d when (box d :? alias * SqlColumnType) ->
+                                            let alias2, col2 = box d :?> (alias * SqlColumnType)
+                                            let alias2f = fieldNotation alias2 col2
+                                            aliasformat (operator.ToString()) alias2f
+                                        | _ ->
+                                            parameters.Add paras.[0]
+                                            aliasformat (operator.ToString()) paras.[0].ParameterName
+                        ))
                         // there's probably a nicer way to do this
                         let rec aux = function
                             | x::[] when preds.Length > 0 ->
@@ -226,194 +466,224 @@ type internal MSAccessProvider() =
                                 ~~ (sprintf " %s " op)
                                 filterBuilder [x]
                                 ~~ (sprintf " %s " op)
-                                aux xs 
+                                aux xs
                             | x::xs ->
                                 filterBuilder [x]
                                 ~~ (sprintf " %s " op)
                                 aux xs
                             | [] -> ()
-                    
+
                         Option.iter aux rest
                         ~~ ")"
-                
+
                     match cond with
                     | Or(preds,rest) -> build "OR" preds rest
-                    | And(preds,rest) ->  build "AND" preds rest 
-                
+                    | And(preds,rest) ->  build "AND" preds rest
+                    | ConstantTrue -> ~~ " (1=1) "
+                    | ConstantFalse -> ~~ " (1=0) "
+
                     filterBuilder conds
-                
-            // next up is the FROM statement which includes joins .. 
-            let fromBuilder(numLinks:int) = 
+
+            // next up is the FROM statement which includes joins ..
+            let fromBuilder(numLinks:int) =
                 sqlQuery.Links
                 |> List.iter(fun (fromAlias, data, destAlias)  ->
                     let joinType = if data.OuterJoin then "LEFT JOIN " else "INNER JOIN "
                     let destTable = getTable destAlias
-                    ~~  (sprintf "%s [%s] as [%s] on [%s].[%s] = [%s].[%s]"
-                        joinType destTable.Name destAlias 
-                        (if data.RelDirection = RelationshipDirection.Parents then fromAlias else destAlias)
-                        data.ForeignKey  
-                        (if data.RelDirection = RelationshipDirection.Parents then destAlias else fromAlias) 
-                        data.PrimaryKey)
+                    ~~  (sprintf "%s [%s] as [%s] on "
+                            joinType destTable.Name destAlias)
+                    ~~  (String.Join(" AND ", (List.zip data.ForeignKey data.PrimaryKey) |> List.map(fun (foreignKey,primaryKey) ->
+                        sprintf "%s = %s"
+                            (fieldNotation (if data.RelDirection = RelationshipDirection.Parents then fromAlias else destAlias) foreignKey)
+                            (fieldNotation (if data.RelDirection = RelationshipDirection.Parents then destAlias else fromAlias) primaryKey)
+                            )))
                     if (numLinks > 0)  then ~~ ")")//append close paren after each JOIN, if necessary
-                        
+
+            let groupByBuilder() =
+                sqlQuery.Grouping |> List.map(fst) |> List.concat
+                |> List.iteri(fun i (alias,column) ->
+                    if i > 0 then ~~ ", "
+                    ~~ (fieldNotation alias column))
 
             let orderByBuilder() =
                 sqlQuery.Ordering
-                |> List.iteri(fun i (alias,column,desc) -> 
+                |> List.iteri(fun i (alias,column,desc) ->
                     if i > 0 then ~~ ", "
-                    ~~ (sprintf "[%s].[%s] %s" alias column (if not desc then "DESC" else "")))
+                    ~~ (sprintf "%s %s" (fieldNotation alias column) (if not desc then "DESC " else "")))
 
-            // SELECT
-            if sqlQuery.Distinct then ~~(sprintf "SELECT DISTINCT %s%s " (if sqlQuery.Take.IsSome then sprintf "TOP %i " sqlQuery.Take.Value else "")   columns)
-            elif sqlQuery.Count then ~~("SELECT COUNT(1) ")
-            else  ~~(sprintf "SELECT %s%s " (if sqlQuery.Take.IsSome then sprintf "TOP %i " sqlQuery.Take.Value else "")  columns)
-            // FROM
             //add in 'numLinks' open parens, after FROM, closing each after each JOIN statement
             let numLinks = sqlQuery.Links.Length
+            if isDeleteScript then
+                ~~(sprintf "DELETE FROM %s[%s] " (new String('(',numLinks)) (baseTable.Name.Replace("\"","")))
+            else 
+                // SELECT
+                if sqlQuery.Distinct then ~~(sprintf "SELECT DISTINCT %s%s " (if sqlQuery.Take.IsSome then sprintf "TOP %i " sqlQuery.Take.Value else "")   columns)
+                elif sqlQuery.Count then ~~("SELECT COUNT(1) ")
+                else  ~~(sprintf "SELECT %s%s " (if sqlQuery.Take.IsSome then sprintf "TOP %i " sqlQuery.Take.Value else "")  columns)
+                // FROM
 
-            ~~(sprintf "FROM %s[%s] as [%s] " (new String('(',numLinks)) baseTable.Name baseAlias)
+                let bal = if baseAlias = "" then baseTable.Name else baseAlias
+                ~~(sprintf "FROM %s[%s] as [%s] " (new String('(',numLinks)) (baseTable.Name.Replace("\"","")) bal)
+                sqlQuery.CrossJoins |> Seq.iter(fun (a,t) -> ~~(sprintf ", [%s] as [%s] " (t.Name.Replace("\"","")) a))
 
             fromBuilder(numLinks)
             // WHERE
             if sqlQuery.Filters.Length > 0 then
                 // each filter is effectively the entire contents of each where clause in the linq query,
                 // of which there can be many. Simply turn them all into one big AND expression as that is the
-                // only logical way to deal with them. 
+                // only logical way to deal with them.
                 let f = [And([],Some sqlQuery.Filters)]
-                ~~"WHERE " 
+                ~~"WHERE "
                 filterBuilder f
-        
+
+            // GROUP BY
+            if sqlQuery.Grouping.Length > 0 then
+                ~~" GROUP BY "
+                groupByBuilder()
+
+            if sqlQuery.HavingFilters.Length > 0 then
+                let keys = sqlQuery.Grouping |> List.map(fst) |> List.concat
+
+                let f = [And([],Some (sqlQuery.HavingFilters |> CommonTasks.parseHaving fieldNotation keys))]
+                ~~" HAVING "
+                filterBuilder f
+
+            // ORDER BY
             if sqlQuery.Ordering.Length > 0 then
                 ~~"ORDER BY "
                 orderByBuilder()
 
+            match sqlQuery.Union with
+            | Some(UnionType.UnionAll, suquery) -> ~~(sprintf " UNION ALL %s " suquery)
+            | Some(UnionType.NormalUnion, suquery) -> ~~(sprintf " UNION %s " suquery)
+            | Some(UnionType.Intersect, suquery) -> ~~(sprintf " INTERSECT %s " suquery)
+            | Some(UnionType.Except, suquery) -> ~~(sprintf " EXCEPT %s " suquery)
+            | None -> ()
+
             let sql = sb.ToString()
             (sql,parameters)
-    
-        member this.ProcessUpdates(con, entities) =
+
+        member this.ProcessUpdates(con, entities, transactionOptions, timeout) =
             let sb = Text.StringBuilder()
-            let (~~) (t:string) = sb.Append t |> ignore
-            entities |> List.iter (fun e -> printfn "entity - %A" e.ColumnValues)
-            // ensure columns have been loaded
-            entities |> List.map(fun e -> e.Table) 
-                     |> Seq.distinct 
-                     |> Seq.iter(fun t -> (this :> ISqlProvider).GetColumns(con,t) |> ignore )
+
+            entities.Keys |> Seq.iter (fun e -> printfn "entity - %A" e.ColumnValues)
+            CommonTasks.``ensure columns have been loaded`` (this :> ISqlProvider) con entities
+
+            if entities.Count = 0 then 
+                ()
+            else
 
             if con.State = ConnectionState.Closed then con.Open()
 
-            let createInsertCommand (entity:SqlEntity) =     
-                let cmd = new OleDbCommand()
-                cmd.Connection <- con :?> OleDbConnection
-                let pk = pkLookup.[entity.Table.FullName] 
-                let columnNames, values = 
-                    (([],0),entity.ColumnValues)
-                    ||> Seq.fold(fun (out,i) (k,v) ->
-                        let name = sprintf "@param%i" i
-                        let p = OleDbParameter(name,v)
-                        (k,p)::out,i+1)
-                    |> fun (x,_)-> x 
-                    |> List.rev
-                    |> List.toArray 
-                    |> Array.unzip
-                
-                sb.Clear() |> ignore
-                ~~(sprintf "INSERT INTO [%s] (%s) VALUES (%s)"//; SELECT @@IDENTITY;" 
-                    entity.Table.Name
-                    (String.Join(",", columnNames))
-                    (String.Join(",", values |> Array.map(fun p -> p.ParameterName))))
-                cmd.Parameters.AddRange(values)
-                cmd.CommandText <- sb.ToString()
-                cmd
-
-            let createUpdateCommand (entity:SqlEntity) changedColumns =
-                let cmd = new OleDbCommand()
-                cmd.Connection <- con :?> OleDbConnection
-                let pk = pkLookup.[entity.Table.FullName] 
-                sb.Clear() |> ignore
-
-                if changedColumns |> List.exists ((=)pk) then failwith "Error - you cannot change the primary key of an entity."
-
-                let pkValue = 
-                    match entity.GetColumnOption<obj> pk with
-                    | Some v -> v
-                    | None -> failwith "Error - you cannot update an entity that does not have a primary key."
-                
-                let data = 
-                    (([],0),changedColumns)
-                    ||> List.fold(fun (out,i) col ->                                                         
-                        let name = sprintf "@param%i" i
-                        let p = 
-                            match entity.GetColumnOption<obj> col with
-                            | Some v -> OleDbParameter(name,v)
-                            | None -> OleDbParameter(name,DBNull.Value)
-                        (col,p)::out,i+1)
-                    |> fun (x,_)-> x 
-                    |> List.rev
-                    |> List.toArray 
-                
-                let pkParam = OleDbParameter("@pk", pkValue)
-
-                ~~(sprintf "UPDATE [%s] SET %s WHERE %s = @pk;" 
-                    entity.Table.Name
-                    (String.Join(",", data |> Array.map(fun (c,p) -> sprintf "%s = %s" c p.ParameterName ) ))
-                    pk)
-
-                cmd.Parameters.AddRange(data |> Array.map snd)
-                cmd.Parameters.Add pkParam |> ignore
-                cmd.CommandText <- sb.ToString()
-                cmd
-            
-            let createDeleteCommand (entity:SqlEntity) =
-                let cmd = new OleDbCommand()
-                cmd.Connection <- con :?> OleDbConnection
-                sb.Clear() |> ignore
-                let pk = pkLookup.[entity.Table.FullName] 
-                sb.Clear() |> ignore
-                let pkValue = 
-                    match entity.GetColumnOption<obj> pk with
-                    | Some v -> v
-                    | None -> failwith "Error - you cannot delete an entity that does not have a primary key."
-                cmd.Parameters.AddWithValue("@id",pkValue) |> ignore
-                ~~(sprintf "DELETE FROM [%s] WHERE %s = @id" entity.Table.Name pk )
-                cmd.CommandText <- sb.ToString()
-                cmd
             try
-                // close the connection first otherwise it won't get enlisted into the transaction 
-                if con.State = ConnectionState.Open then con.Close()
-                con.Open()
+                // close the connection first otherwise it won't get enlisted into the transaction
+                // ...but if access connection is ever closed, it will start to give unknown errors!
+                // if con.State = ConnectionState.Open then con.Close()
                 use trnsx = con.BeginTransaction()
-                try                
+                try
                     // initially supporting update/create/delete of single entities, no hierarchies yet
-                    entities
-                    |> List.iter(fun e -> 
+                    entities.Keys
+                    |> Seq.iter(fun e ->
                         match e._State with
-                        | Created -> 
-                            let cmd = createInsertCommand e
+                        | Created ->
+                            let cmd = createInsertCommand con sb e
                             cmd.Transaction <- trnsx :?> OleDbTransaction
-                            Common.QueryEvents.PublishSqlQuery cmd.CommandText
+                            Common.QueryEvents.PublishSqlQueryCol cmd.CommandText cmd.Parameters
+                            if timeout.IsSome then
+                                cmd.CommandTimeout <- timeout.Value
                             let id = cmd.ExecuteScalar()
-                            match e.GetColumnOption pkLookup.[e.Table.FullName] with
-                            | Some v -> () // if the primary key exists, do nothing
-                                           // this is because non-identity columns will have been set 
-                                           // manually and in that case scope_identity would bring back 0 "" or whatever
-                            | None ->  e.SetColumnSilent(pkLookup.[e.Table.FullName], id)
+                            CommonTasks.checkKey pkLookup id e
                             e._State <- Unchanged
-                        | Modified fields -> 
-                            let cmd = createUpdateCommand e fields
+                        | Modified fields ->
+                            let cmd = createUpdateCommand con sb e fields
                             cmd.Transaction <- trnsx :?> OleDbTransaction
-                            Common.QueryEvents.PublishSqlQuery cmd.CommandText
+                            Common.QueryEvents.PublishSqlQueryCol cmd.CommandText cmd.Parameters
+                            if timeout.IsSome then
+                                cmd.CommandTimeout <- timeout.Value
                             cmd.ExecuteNonQuery() |> ignore
                             e._State <- Unchanged
-                        | Deleted -> 
-                            let cmd = createDeleteCommand e
+                        | Delete ->
+                            let cmd = createDeleteCommand con sb e
                             cmd.Transaction <- trnsx :?> OleDbTransaction
-                            Common.QueryEvents.PublishSqlQuery cmd.CommandText
+                            Common.QueryEvents.PublishSqlQueryCol cmd.CommandText cmd.Parameters
+                            if timeout.IsSome then
+                                cmd.CommandTimeout <- timeout.Value
                             cmd.ExecuteNonQuery() |> ignore
                             // remove the pk to prevent this attempting to be used again
-                            e.SetColumnOptionSilent(pkLookup.[e.Table.FullName], None)
-                        | Unchanged -> failwith "Unchanged entity encountered in update list - this should not be possible!")
+                            e.SetPkColumnOptionSilent(pkLookup.[e.Table.FullName], None)
+                            e._State <- Deleted
+                        | Deleted | Unchanged -> failwith "Unchanged entity encountered in update list - this should not be possible!")
                     trnsx.Commit()
-                with 
-                |e -> trnsx.Rollback()
+
+                with _ ->
+                    trnsx.Rollback()
             finally
-                con.Close()
+                ()
+                //con.Close()
+
+        member this.ProcessUpdatesAsync(con, entities, transactionOptions, timeout) =
+            let sb = Text.StringBuilder()
+
+            entities.Keys |> Seq.iter (fun e -> printfn "entity - %A" e.ColumnValues)
+            CommonTasks.``ensure columns have been loaded`` (this :> ISqlProvider) con entities
+
+            if entities.Count = 0 then 
+                async { () }
+            else
+
+            try
+                // close the connection first otherwise it won't get enlisted into the transaction
+                // ...but if access connection is ever closed, it will start to give unknown errors!
+                // if con.State = ConnectionState.Open then con.Close()
+                async {
+                    if con.State <> ConnectionState.Open then
+                        do! con.OpenAsync() |> Async.AwaitIAsyncResult |> Async.Ignore
+                    use trnsx = con.BeginTransaction()
+                    try
+                        // initially supporting update/create/delete of single entities, no hierarchies yet
+                        let handleEntity (e: SqlEntity) =
+                            match e._State with
+                            | Created ->
+                                async {
+                                    let cmd = createInsertCommand con sb e
+                                    cmd.Transaction <- trnsx :?> OleDbTransaction
+                                    Common.QueryEvents.PublishSqlQueryCol cmd.CommandText cmd.Parameters
+                                    if timeout.IsSome then
+                                        cmd.CommandTimeout <- timeout.Value
+                                    let! id = cmd.ExecuteScalarAsync() |> Async.AwaitTask
+                                    CommonTasks.checkKey pkLookup id e
+                                    e._State <- Unchanged
+                                }
+                            | Modified fields ->
+                                async {
+                                    let cmd = createUpdateCommand con sb e fields
+                                    cmd.Transaction <- trnsx :?> OleDbTransaction
+                                    Common.QueryEvents.PublishSqlQueryCol cmd.CommandText cmd.Parameters
+                                    if timeout.IsSome then
+                                        cmd.CommandTimeout <- timeout.Value
+                                    do! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                                    e._State <- Unchanged
+                                }
+                            | Delete ->
+                                async {
+                                    let cmd = createDeleteCommand con sb e
+                                    cmd.Transaction <- trnsx :?> OleDbTransaction
+                                    Common.QueryEvents.PublishSqlQueryCol cmd.CommandText cmd.Parameters
+                                    if timeout.IsSome then
+                                        cmd.CommandTimeout <- timeout.Value
+                                    do! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                                    // remove the pk to prevent this attempting to be used again
+                                    e.SetPkColumnOptionSilent(pkLookup.[e.Table.FullName], None)
+                                    e._State <- Deleted
+                                }
+                            | Deleted | Unchanged -> failwith "Unchanged entity encountered in update list - this should not be possible!"
+
+                        do! Utilities.executeOneByOne handleEntity (entities.Keys|>Seq.toList)
+                        trnsx.Commit()
+
+                    with _ ->
+                        trnsx.Rollback()
+                }
+            finally
+                //con.Close()
+                ()

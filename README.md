@@ -3,6 +3,8 @@
 
 # SQLProvider [![NuGet Status](http://img.shields.io/nuget/v/SQLProvider.svg?style=flat)](https://www.nuget.org/packages/SQLProvider/)
 
+[![Join the chat at https://gitter.im/fsprojects/SQLProvider](https://badges.gitter.im/fsprojects/SQLProvider.svg)](https://gitter.im/fsprojects/SQLProvider?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 A general .NET/Mono SQL database type provider. Current features :
  * LINQ queries
  * Lazy schema exploration 
@@ -17,14 +19,17 @@ A general .NET/Mono SQL database type provider. Current features :
  * Optional option types
  * Mapping to record types
  * Custom Operators
+ * Supports Asynchronous Operations
+ * Supports .NET Standard / .NET Core 
   
 The provider currently has explicit implementations for the following database vendors : 
 * SQL Server
 * SQLite
 * PostgreSQL
 * Oracle
-* MySQL
+* MySQL (& MariaDB)
 * MsAccess
+* Firebird
 
 There is also an ODBC provider that will let you connect to any ODBC source with limited features. 
 
@@ -39,8 +44,8 @@ additional samples and documentation!
 
 ## Building
 
-* Mono: Run *build.sh*  [![Mono build status](https://travis-ci.org/fsprojects/SQLProvider.png)](https://travis-ci.org/fsprojects/SQLProvider)
-* Windows: Run *build.cmd* [![Build status](https://ci.appveyor.com/api/projects/status/ngbj9995twhfqn28?svg=true)](https://ci.appveyor.com/project/colinbull/sqlprovider-ogy2l)
+* Mono: Run *build.sh*  [![Mono build status](https://travis-ci.org/fsprojects/SQLProvider.svg?branch=master)](https://travis-ci.org/fsprojects/SQLProvider)
+* Windows: Run *build.cmd* [![Build status](https://ci.appveyor.com/api/projects/status/ngbj9995twhfqn28/branch/master?svg=true)](https://ci.appveyor.com/project/colinbull/sqlprovider-ogy2l/branch/master)
 
 ## Known issues
 

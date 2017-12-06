@@ -1,7 +1,7 @@
 (*** hide ***)
-#I @"../files/sqlite"
+#I @"../../files/sqlite"
 (*** hide ***)
-#I "../../bin"
+#I "../../../bin/net451"
 (*** hide ***)
 [<Literal>]
 let connectionString = "Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=MyHost)(PORT=MyPort))(CONNECT_DATA=(SERVICE_NAME=MyOracleSID)));User Id=myUsername;Password=myPassword;"
@@ -24,3 +24,9 @@ type sql = SqlDataProvider<Common.DatabaseProviderTypes.ORACLE, connectionString
 let ctx = sql.GetDataContext()
 
 let customers = ctx.Customers |> Seq.toArray
+
+(**
+
+Because Oracle databases can be huge, there is an optional constructor parameter `TableNames` that can be used as a filter.
+
+*)

@@ -1,5 +1,5 @@
 (*** hide ***)
-#I "../../bin"
+#I "../../bin/net451"
 
 (**
 SQLProvider
@@ -10,15 +10,17 @@ A general .NET/Mono SQL database type provider. Current features:
 * [LINQ queries](core/querying.html)
 * Lazy schema exploration 
 * Automatic constraint navigation
-* [Individuals](Individuals.html)
+* [Individuals](core/individuals.html)
 * Transactional [CRUD](core/crud.html) operations with identity support
 * [Stored Procedures](core/programmability.html)
 * [Functions](core/programmability.html)
 * Packages (Oracle)
 * [Composable Query](core/composable.html) integration
 * Optional option types
-* Mapping to record types
+* [Mapping to record types](core/mappers.html)
 * Custom Operators
+* Supports [Asynchronous Operations](core/async.html)
+* Supports [.NET Standard / .NET Core](core/netstandard.html)
   
 The provider currently has explicit implementations for the following database vendors:
  
@@ -28,6 +30,7 @@ The provider currently has explicit implementations for the following database v
 * Oracle
 * MySQL
 * MsAccess
+* Firebird
 
 There is also an ODBC provider that will let you connect to any ODBC source with limited features. 
 
@@ -35,7 +38,7 @@ All database vendors except SQL Server and MS Access will require 3rd party ADO.
 
 SQLite is based on the .NET drivers found [here](http://system.data.sqlite.org/index.html/doc/trunk/www/downloads.wiki). You will need the correct version for your specific architecture and setup.
 
-PostgreSQL is based on the .NET drivers found [here](http://npgsql.projects.pgfoundry.org/).  The type provider will make frequent calls to the database. I found that using the default settings for the PostgreSQL server on my Windows machine would deny the provider constant access - you may need to try setting  `Pooling=false` in the connection string, increasing timeouts or setting other relevant security settings to enable a frictionless experience.
+PostgreSQL is based on the Npgsql .NET drivers found [here](http://www.npgsql.org/doc/). The type provider will make frequent calls to the database. Npgsql provides a set of [performance related connection strings parameters](http://www.npgsql.org/doc/connection-string-parameters.html#performance) for tweaking its performance
 
 MySQL is based on the .NET drivers found [here](http://dev.mysql.com/downloads/connector/net/1.0.html). You will need the correct version for your specific architecture and setup. You also need to specify ResolutionPath, which points to the folder containing the dll files for the MySQL driver.
 
@@ -73,6 +76,9 @@ type sql = SqlDataProvider<
               UseOptionTypes = true >
 let ctx = sql.GetDataContext()
 
+// To use dynamic runtime connectionString, you could use:
+// let ctx = sql.GetDataContext connectionString2
+
 // pick individual entities from the database 
 let christina = ctx.Main.Customers.Individuals.``As ContactName``.``BERGS, Christina Berglund``
 
@@ -102,10 +108,9 @@ let mattisOrderDetails =
 Samples & documentation
 -----------------------
 
-The library comes with comprehensible documentation.
+The library comes with comprehensive documentation.
 
  * [General](core/general.html) a high level view on the type providers' abilities and limitations
- * [Configuration & Setup](core/config.html) details on how to get the type provider up and running for your database
  * [Static Parameters](core/parameters.html) available static parameters
  * [Querying](core/querying.html) information on supported LINQ keywords and custom operators with examples
  * [Relationships](core/constraints-relationships.html) how to use automatic constraint navigation in your queries
@@ -113,6 +118,7 @@ The library comes with comprehensible documentation.
  * [Programmability](core/programmability.html) usage and limitations of stored procedures and functions
  * [Individuals](core/individuals.html) usage and limitations of this unique feature
  * [Composable Query](core/composable.html) information on integrating this project with the SQL provider
+ * [Mapping to record types](core/mappers.html)
  * [API Reference](reference/index.html) contains automatically generated documentation for all types, modules
    and functions in the library. 
 
@@ -122,15 +128,17 @@ Contributing and copyright
 --------------------------
 
 The project is hosted on [GitHub][gh] where you can [report issues][issues], fork 
-the project and submit pull requests. If you're adding new public API, please also 
+the project and submit [pull requests](core/contributing.html). If you're adding new public API, please also 
 consider adding [samples][content] that can be turned into a documentation. You might
 also want to read [library design notes][readme] to understand how it works.
+Our tests have [more samples][tests]. Learn more tech [tech details](core/techdetails.html).
 
 The library is available under Public Domain license, which allows modification and 
 redistribution for both commercial and non-commercial purposes. For more information see the 
 [License file][license] in the GitHub repository. 
 
-  [content]: https://github.com/fsprojects/SQLProvider/tree/master/docs/content
+  [content]: https://github.com/fsprojects/SQLProvider/tree/master/docs/content/core
+  [tests]: https://github.com/fsprojects/SQLProvider/tree/master/tests/SqlProvider.Tests/scripts
   [gh]: https://github.com/fsprojects/SQLProvider
   [issues]: https://github.com/fsprojects/SQLProvider/issues
   [readme]: https://github.com/fsprojects/SQLProvider/blob/master/README.md

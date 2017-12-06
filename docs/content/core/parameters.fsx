@@ -1,7 +1,7 @@
 ﻿(*** hide ***)
 #I @"../../files/sqlite"
 (*** hide ***)
-#I "../../../bin"
+#I "../../../bin/net451"
 (*** hide ***)
 #r "FSharp.Data.SqlProvider.dll"
 open FSharp.Data.Sql
@@ -15,7 +15,7 @@ open FSharp.Data.Sql
 These are the "common" parameters used by all SqlProviders.
 
 All static parameters must be known at compile time, for strings this can be 
-achieved by adding the [<Literal>] attribute if you are not passing it inline.
+achieved by adding the `[<Literal>]` attribute if you are not passing it inline.
 
 ### ConnectionString
 
@@ -51,8 +51,8 @@ let dbVendor = Common.DatabaseProviderTypes.SQLITE
 (**
 ### ResolutionPath
 
-When using datbase vendors other than SQL Server, Access and ODBC, a third party driver
-is required. This parameter should point to an abosulte or relative directory where the
+When using database vendors other than SQL Server, Access and ODBC, a third party driver
+is required. This parameter should point to an absolute or relative directory where the
 relevant assemblies are located. See the database vendor specific page for more details.
 *)
 
@@ -63,7 +63,7 @@ let resolutionPath =
 (**
 ### IndividualsAmount
 
-Number of instances to retrieve when using the [individuals](core/individuals.html) feature.
+Number of instances to retrieve when using the [individuals](individuals.html) feature.
 Default is 1000.
 *)
 
@@ -73,7 +73,7 @@ let indivAmt = 500
 (**
 ### UseOptionTypes
 
-If set to true, all nullable fields will be represented by F# option tyes.  If false, nullable
+If set to true, all nullable fields will be represented by F# option types.  If false, nullable
 fields will be represented by the default value of the column type - this is important because
 the provider will return 0 instead of null, which might cause problems in some scenarios.
 *)
@@ -86,19 +86,24 @@ let useOptionTypes = true
 
 ### MSSQL
 
-No extra parameters.
+TableNames to filter amount of tables.
 
 ### Oracle
 
-Currently there is only one added parameter.
+TableNames to filter amount of tables, and Owner.
 
-#### Owner (Oracle only)
+#### Owner (Used by Oracle, MySQL and PostgreSQL)
 
-This sets the owner of the scheme when running queries against the server.
+This has different meanings when running queries against different database vendors
+
+For PostgreSQL, this sets the schema name where the target tables belong to
+For MySQL, this sets the database name (Or schema name, for MySQL, it's the same thing)
+For Oracle, this sets the owner of the scheme
 
 ### SQLite
 
-No extra parameters.
+The additional [SQLiteLibrary parameter](sqlite.html#SQLiteLibrary) can be used to specify
+which SQLite library to load.
 
 ### PostgreSQL
 
@@ -126,3 +131,15 @@ type sql = SqlDataProvider<
             UseOptionTypes = useOptionTypes
           >
 
+(**
+
+# SQL Provider Data Context Parameters
+
+Besides the static parameters the `.GetDataContext(...)` method has optional parameters:
+
+* connectionString - The database connection string on runtime.
+* resolutionPath - The location to look for dynamically loaded assemblies containing database vendor specific connections and custom types
+* transactionOptions - TransactionOptions for the transaction created on SubmitChanges.
+* commandTimeout - SQL command timeout. Maximum time for single SQL-command in seconds.
+			  
+*)

@@ -1,0 +1,98 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!--TargetFramework>netcoreapp2.0</TargetFramework-->
+    <TargetFrameworks>netcoreapp2.0;netstandard2.0</TargetFrameworks>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+  </PropertyGroup>
+  <!-- FSharp config -->
+  <PropertyGroup>
+    <IsWindows Condition="'$(OS)' == 'Windows_NT'">true</IsWindows>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildRuntimeType)' == 'Core'">
+    <IsOSX Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::OSX)))' == 'true'">true</IsOSX>
+    <IsLinux Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Linux)))' == 'true'">true</IsLinux>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(IsWindows)' == 'true'">
+    <FscToolPath>C:\Program Files (x86)\Microsoft SDKs\F#\4.1\Framework\v4.0</FscToolPath>
+    <FscToolExe>fsc.exe</FscToolExe>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(IsOSX)' == 'true'">
+    <FscToolPath>/Library/Frameworks/Mono.framework/Versions/Current/Commands</FscToolPath>
+    <FscToolExe>fsharpc</FscToolExe>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(IsLinux)' == 'true'">
+    <FscToolPath>/usr/bin</FscToolPath>
+    <FscToolExe>fsharpc</FscToolExe>
+  </PropertyGroup>
+  <!-- /FSharp config -->
+  <ItemGroup>
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="MySqlConnector" Version="0.29.0" />
+    <PackageReference Condition="'$(IsWindows)' == 'true'" Include="SQLProvider" Version="1.1.22" />
+    <PackageReference Include="System.ComponentModel.TypeConverter" Version="4.3.0" />
+    <PackageReference Include="System.Console" Version="4.3.0" />
+    <PackageReference Include="System.Data.Common" Version="4.3.0" />
+    <PackageReference Include="System.Runtime" Version="4.3.0" />
+    <PackageReference Include="System.Runtime.Extensions" Version="4.3.0" />
+    <PackageReference Include="System.Reflection" Version="4.3.0" />
+    <PackageReference Include="System.Reflection.TypeExtensions" Version="4.4.0" />
+    <PackageReference Include="System.Runtime.Serialization.Formatters" Version="4.3.0" />
+  </ItemGroup>
+  <!-- .NET 4.61 is Net Standard 2.0 compatible so use what ever libraries.
+      However non-Windows typeprovider will call Mono on compile-time. Mono is not Net Standard 2.0 compatible.
+      So Mono will use Net 4.5.1 libraries. Typeprovider handles that on compilation, and after compile your 
+      assembly will ve .NET Core compatible. -->
+  <ItemGroup><!-- Mono fix -->
+    <Reference Condition="'$(IsWindows)' != 'true'" Include="FSharp.Data.SqlProvider">
+      <HintPath>../../../bin/net451/FSharp.Data.SqlProvider.dll</HintPath>
+      <!--HintPath>../../packages/SQLProvider/lib/net451/FSharp.Data.SqlProvider.dll</HintPath-->
+    </Reference>
+  </ItemGroup>  
+  <Target Name="MySqlConnectorCopyLibrariesWin">
+    <Exec Command="xcopy ..\..\..\packages\scripts\MySqlConnector\lib\netstandard2.0\MySqlConnector.dll connectorTemp\ /y" />
+    <Exec Command="xcopy ..\..\..\packages\standard\System.Buffers\lib\netstandard2.0\System.Buffers.dll connectorTemp\ /y" />
+    <Exec Command="xcopy ..\..\..\packages\standard\System.Threading.Tasks.Extensions\lib\netstandard2.0\System.Threading.Tasks.Extensions.dll connectorTemp\ /y" />
+    <Exec Command="xcopy ..\..\..\packages\standard\System.Runtime.InteropServices.RuntimeInformation\lib\netstandard1.1\System.Runtime.InteropServices.RuntimeInformation.dll connectorTemp\ /y" />
+    <Exec Command="xcopy ..\..\..\packages\standard\System.Data.Common\lib\netstandard1.2\System.Data.Common.dll connectorTemp\ /y" />
+  </Target>
+  <Target Name="MySqlConnectorCopyLibrariesNonWin">
+    <Exec Command="mkdir -p connectorTemp" />
+    <Exec Command="cp ../../../packages/scripts/MySqlConnector/lib/net45/MySqlConnector.dll connectorTemp/ " />
+    <Exec Command="cp ../../../packages/standard/System.Buffers/lib/netstandard1.1/System.Buffers.dll connectorTemp/ " />
+    <Exec Command="cp ../../../packages/standard/System.Threading.Tasks.Extensions/lib/portable-net45+win8+wp8+wpa81/System.Threading.Tasks.Extensions.dll connectorTemp/ " />
+    <Exec Command="cp ../../../packages/standard/System.Runtime.InteropServices.RuntimeInformation/lib/net45/System.Runtime.InteropServices.RuntimeInformation.dll connectorTemp/ " />
+    <Exec Command="cp ../../../packages/standard/System.Data.Common/lib/netstandard1.2/System.Data.Common.dll connectorTemp/ " />
+  </Target>
+  <!-- MySql.Data.dll is currently not CoreApp 2.0 compatible in Nuget. But you can use the local if you want.
+       Just uncomment these commented lines.
+	   -->
+  <!-- 
+  <Target Name="MySqlDataCopyLibrariesWin">
+    <Exec Command="xcopy ..\..\..\packages\standard\System.Security.Principal.Windows\lib\netstandard2.0\System.Security.Principal.Windows.dll dataTemp\ /y" />
+    <Exec Command="xcopy ..\..\..\packages\standard\System.Text.Encoding.CodePages\lib\netstandard2.0\System.Text.Encoding.CodePages.dll dataTemp\ /y" />
+    <Exec Command="xcopy core\MySql.Data.dll dataTemp\ /y" />
+  </Target>
+  <Target Name="MySqlDataCopyLibrariesNonWin">
+    <Exec Command="mkdir -p dataTemp" />
+    <Exec Command="cp ../../../packages/scripts/MySql.Data/lib/net45/MySql.Data.dll dataTemp/ " />
+  </Target>
+  <ItemGroup>
+    <Reference Include="MySql.Data.dll">
+      <HintPath>core/MySql.Data.dll</HintPath>
+    </Reference>
+  </ItemGroup>    
+  -->
+  <Target Name="PreBuild" BeforeTargets="PreBuildEvent">
+    <!-- Using driver MySql.Data.dll --><!--
+    <CallTarget Targets="MySqlDataCopyLibrariesWin" Condition="'$(IsWindows)' == 'true'"/>
+    <CallTarget Targets="MySqlDataCopyLibrariesNonWin" Condition="'$(IsWindows)' != 'true'"/>
+	-->
+    <!-- Using driver MySqlConnector.dll (Faster) -->
+    <CallTarget Targets="MySqlConnectorCopyLibrariesWin" Condition="'$(IsWindows)' == 'true'" />
+    <CallTarget Targets="MySqlConnectorCopyLibrariesNonWin" Condition="'$(IsWindows)' != 'true'" />
+  </Target>
+</Project>

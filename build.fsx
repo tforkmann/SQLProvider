@@ -10,6 +10,11 @@ open Fake.ReleaseNotesHelper
 open System
 open System.IO
 
+#if MONO
+#else
+#load @"packages/SourceLink.Fake/tools/SourceLink.fsx"
+#endif
+
 // --------------------------------------------------------------------------------------
 // START TODO: Provide project-specific details below
 // --------------------------------------------------------------------------------------
@@ -77,20 +82,36 @@ Target "AssemblyInfo" (fun _ ->
 Target "RestorePackages" RestorePackages
 
 Target "Clean" (fun _ ->
-    CleanDirs ["bin"; "temp"]
+    DeleteDirs ["bin"; "temp"]
 )
 
 Target "CleanDocs" (fun _ ->
-    CleanDirs ["docs/output"]
+    DeleteDirs ["docs/output"]
 )
 
 // --------------------------------------------------------------------------------------
 // Build library & test project
 
 Target "Build" (fun _ ->
+
+    // Build .NET Framework solution
     !!"SQLProvider.sln" ++ "SQLProvider.Tests.sln"
     |> MSBuildRelease "" "Rebuild"
     |> ignore
+)
+
+Target "BuildCore" (fun _ ->
+
+    // Build .NET Core solution
+    DotNetCli.Restore(fun p -> 
+        { p with 
+            Project = "src/SQLProvider.Standard/SQLProvider.Standard.fsproj"
+            NoCache = true})
+
+    DotNetCli.Build(fun p -> 
+        { p with 
+            Project = "src/SQLProvider.Standard/SQLProvider.Standard.fsproj"
+            Configuration = "Release"})
 )
 
 // --------------------------------------------------------------------------------------
@@ -109,8 +130,21 @@ Target "RunTests" (fun _ ->
 // Build a NuGet package
 
 Target "NuGet" (fun _ ->
-    
-    CopyFiles @"temp/lib" !!"bin/**/FSharp.Data.SqlProvider.dll"
+    // Before release, set your API-key as instructed in the bottom of page https://www.nuget.org/account
+
+#if MONO
+#else
+    let dotnetSdk = @"C:\Program Files\dotnet\sdk\2.0.0\Microsoft\Microsoft.NET.Build.Extensions\net461\lib\"
+    if directoryExists dotnetSdk then
+       CopyFile "bin/netstandard2.0" (dotnetSdk + @"netstandard.dll")
+       CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.Console.dll")
+       CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.IO.dll")
+       CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.Reflection.dll")
+       CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.Runtime.dll")
+    CopyFile "bin/netstandard2.0" "packages/System.Data.SqlClient/lib/net461/System.Data.SqlClient.dll" 
+#endif
+
+    CopyDir @"temp/lib" "bin" allFiles
 
     NuGet (fun p ->
         { p with
@@ -129,6 +163,10 @@ Target "NuGet" (fun _ ->
         (project + ".nuspec")
 
     CleanDir "Temp"
+    Branches.tag "" release.NugetVersion
+
+    // push manually: nuget.exe push bin\SQLProvider.1.*.nupkg -Source https://www.nuget.org/api/v2/package
+    //Branches.pushTag "" "upstream" release.NugetVersion
 )
 
 Target "PackNuGet" (fun _ -> 
@@ -172,8 +210,8 @@ Target "GenerateHelp" (fun _ ->
     CopyFile "docs/content/" "LICENSE.txt"
     Rename "docs/content/license.md" "docs/content/LICENSE.txt"
 
-    CopyFile "bin" "packages/FSharp.Core/lib/net40/FSharp.Core.sigdata"
-    CopyFile "bin" "packages/FSharp.Core/lib/net40/FSharp.Core.optdata"
+    CopyFile "bin/net451" "packages/FSharp.Core/lib/net40/FSharp.Core.sigdata"
+    CopyFile "bin/net451" "packages/FSharp.Core/lib/net40/FSharp.Core.optdata"
 
     generateHelp true
 )
@@ -208,6 +246,19 @@ Target "KeepRunning" (fun _ ->
 
 Target "GenerateDocs" DoNothing
 
+#if MONO
+Target "SourceLink" <| fun () -> ()
+#else
+open SourceLink
+Target "SourceLink" <| fun () ->
+    let baseUrl = sprintf "%s/%s/{0}/%%var2%%" gitRaw project
+    !! "src/*.fsproj"
+    |> Seq.iter (fun file ->
+        let proj = VsProj.LoadRelease file
+        SourceLink.Index proj.CompilesNotLinked proj.OutputFilePdb __SOURCE_DIRECTORY__ baseUrl
+       )
+#endif
+
 // --------------------------------------------------------------------------------------
 // Release Scripts
 
@@ -236,8 +287,10 @@ Target "BuildDocs" DoNothing
 "Clean"
   ==> "AssemblyInfo"
   ==> "Build"
+  =?> ("BuildCore", isLocalBuild || not isMono)
   ==> "RunTests"
   ==> "CleanDocs"
+  // Travis doesn't support mono+dotnet:
   =?> ("GenerateReferenceDocs",isLocalBuild && not isMono)
   =?> ("GenerateHelp",isLocalBuild && not isMono)
   ==> "All"
@@ -246,7 +299,11 @@ Target "BuildDocs" DoNothing
   ==> "BuildDocs"
 
 "All" 
-  ==> "NuGet"
+#if MONO
+#else
+  =?> ("SourceLink", Pdbstr.tryFind().IsSome )
+#endif
+  =?> ("NuGet", not(hasBuildParam "onlydocs"))
   ==> "ReleaseDocs"
   ==> "Release"
 

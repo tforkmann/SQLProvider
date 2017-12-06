@@ -1,24 +1,27 @@
 (*** hide ***)
 #I "../../files/sqlite"
 (*** hide ***)
-#I "../../../bin"
+#I "../../../bin/net451"
 (*** hide ***)
-#r @"../../../bin/FSharp.Data.SqlProvider.dll"
+#r @"../../../bin/net451/FSharp.Data.SqlProvider.dll"
 
 (*** hide ***)
 [<Literal>]
 let connectionString = "Data Source=" + __SOURCE_DIRECTORY__ + @"/../../../tests/SqlProvider.Tests/scripts/northwindEF.db;Version=3"
 
 (*** hide ***)
+let connectionString2 = "Data Source=" + __SOURCE_DIRECTORY__ + @"/../../../tests/SqlProvider.Tests/scripts/northwindEF.db;Version=3"
+
+(*** hide ***)
 [<Literal>]
-let resolutionPath = __SOURCE_DIRECTORY__ + @"/../../files/sqlite"
+let resolutionPath = __SOURCE_DIRECTORY__ + @"/../../../tests/SqlProvider.Tests/libs"
 
 (**
 
 
 # SQL Provider Basics
 
-The SQL provider in an erasing type provider which enables you to instantly 
+The SQL provider is an erasing type provider which enables you to instantly 
 connect to a variety of database sources in the IDE and explore them in a 
 type-safe manner, without the inconvenience of a code-generation step.
 
@@ -26,9 +29,10 @@ SQL Provider supports the following database types:
 
 * [MSSQL](mssql.html) 
 * [Oracle](oracle.html) 
-* [SQLite](sqlite.heml) 
+* [SQLite](sqlite.html) 
 * [PostgreSQL](postgresql.html)
 * [MySQL](mysql.html)
+* [MsAccess](msaccess.html)
 * [ODBC](odbc.html) (_Experimental_, only supports SELECT & MAKE)
 
 After you have installed the nuget package or built the type provider assembly 
@@ -71,6 +75,14 @@ schema and reading its data, you create a *DataContext* value.
 *)
 
 let ctx = sql.GetDataContext()
+
+(**
+If you want to use non-literal connectionString at runtime (e.g. crypted production
+passwords), you can pass your runtime connectionString parameter to GetDataContext:
+*)
+
+let ctx2 = sql.GetDataContext connectionString2
+
 (**
 
 When you press ``.`` on ``ctx``, intellisense will display a list of properties 
@@ -94,6 +106,10 @@ let name = firstCustomer.ContactName
 (**
 Each property is correctly typed depending on the database column 
 definitions.  In this example, ``firstCustomer.ContactName`` is a string.
+
+Most of the databases support some kind of comments/descriptions/remarks to
+tables and columns for documentation purposes. These descriptions are fetched
+to tooltips for the tables and columns.
 *)
 
 (**
@@ -132,6 +148,20 @@ let customersQuery =
             select customer
     }
     |> Seq.toArray
+
+(**
+
+Support also async queries
+
+ *)
+
+let customersQueryAsync = 
+    query { 
+        for customer in ctx.Main.Customers do
+            select customer
+    }
+    |> Seq.executeQueryAsync |> Async.StartAsTask
+
 
 (**
 The above example is identical to the query that was executed when 

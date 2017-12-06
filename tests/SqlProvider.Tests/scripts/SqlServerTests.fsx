@@ -1,15 +1,15 @@
-﻿#I @"../../../bin"
-#r @"../../../bin/FSharp.Data.SqlProvider.dll"
+﻿#I @"../../../bin/net451"
+#r @"../../../bin/net451/FSharp.Data.SqlProvider.dll"
 
 open System
 open FSharp.Data.Sql
 
 [<Literal>]
-//let connStr = @"Data Source=localhost; Initial Catalog=HR; Integrated Security=True"
-let connStr = "Data Source=SQLSERVER;Initial Catalog=HR;User Id=sa;Password=password"
+let connStr = @"Data Source=localhost; Initial Catalog=HR; Integrated Security=True"
+//let connStr = "Data Source=SQLSERVER;Initial Catalog=HR;User Id=sa;Password=password"
 [<Literal>]
 let resolutionFolder = __SOURCE_DIRECTORY__
-FSharp.Data.Sql.Common.QueryEvents.SqlQueryEvent |> Event.add (printfn "Executing SQL: %s")
+FSharp.Data.Sql.Common.QueryEvents.SqlQueryEvent |> Event.add (printfn "Executing SQL: %O")
 
 let processId = System.Diagnostics.Process.GetCurrentProcess().Id;
 
@@ -36,6 +36,15 @@ let employeesFirstName =
         for emp in ctx.Dbo.Employees do
         select emp.FirstName
     } |> Seq.toList
+
+let employeesFirstNameAsync = 
+    query {
+        for emp in ctx.Dbo.Employees do
+        select emp.FirstName
+    } |> Seq.executeQueryAsync |> Async.RunSynchronously
+
+// Note that Employees-table should have a Description-field in database, visible as XML-tooltip in your IDE.
+// Column-level descriptions work also, but they are not included to exported SQL-scripts by SQL-server.
 
 //Ref issue #92
 let employeesFirstNameEmptyList = 
@@ -91,7 +100,19 @@ let topSales5ByCommission =
     |> Seq.map (fun e -> e.MapTo<Employee>())
     |> Seq.toList
 
-#r @"..\..\..\packages\Newtonsoft.Json\lib\net45\Newtonsoft.Json.dll"
+let pagingTest = 
+    query {
+        for emp in ctx.Dbo.Employees do
+        sortByDescending emp.CommissionPct
+        select emp
+        skip 2
+        take 5
+    } 
+    |> Seq.map (fun e -> e.MapTo<Employee>())
+    |> Seq.toList
+
+#I @"../../../packages/scripts/Newtonsoft.Json/lib/net45"
+#r @"../../../packages/scripts/Newtonsoft.Json/lib/net45/Newtonsoft.Json.dll"
 
 open Newtonsoft.Json
 
@@ -123,6 +144,37 @@ let countries =
                )
     |> Seq.toList
 
+
+open System.Linq
+
+let nestedQueryTest = 
+    let qry1 = query {
+        for emp in ctx.Dbo.Employees do
+        where (emp.FirstName.StartsWith("S"))
+        select (emp.FirstName)
+    }
+    query {
+        for emp in ctx.Dbo.Employees do
+        where (qry1.Contains(emp.FirstName))
+        select (emp.FirstName, emp.LastName)
+    } |> Seq.toArray
+
+
+
+let canoncicalOpTest = 
+    query {
+        // Silly query not hitting indexes, so testing purposes only...
+        for job in ctx.Dbo.Jobs do
+        join emp in ctx.Dbo.Employees on (job.JobId.Trim() + "z" = emp.JobId.Trim() + "z")
+        where (
+            floor(job.MaxSalary)+1m > 4m
+            && emp.Email.Length > 1  
+            && emp.HireDate.Date.AddYears(-3).Year + 1 > 1997
+        )
+        sortBy emp.HireDate.Day
+        select (emp.HireDate, emp.Email, job.MaxSalary)
+    } |> Seq.toArray
+
 //************************ CRUD *************************//
 
 
@@ -146,7 +198,7 @@ antartica.RegionName <- "ant"
 ctx.SubmitUpdates()
 
 antartica.Delete()
-ctx.SubmitUpdates()
+ctx.SubmitUpdatesAsync() |> Async.RunSynchronously
 
 //********************** Procedures **************************//
 
@@ -159,6 +211,12 @@ let employees =
       for e in ctx.Procedures.GetEmployees.Invoke().ResultSet do
         yield e.MapTo<Employee>()
     ]
+
+let employeesAsync =
+    async {
+        let! ia = ctx.Procedures.GetEmployees.InvokeAsync()
+        return ia.ResultSet
+    } |> Async.RunSynchronously
 
 type Region = {
     RegionId : int
@@ -188,3 +246,12 @@ let getemployees hireDate =
     ]
 
 getemployees (new System.DateTime(1999,4,1))
+
+
+//******************** Delete all test **********************//
+
+query {
+    for c in ctx.Dbo.Employees do
+    where (c.FirstName = "Tuomas")
+} |> Seq.``delete all items from single table`` 
+|> Async.RunSynchronously
