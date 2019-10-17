@@ -2,7 +2,7 @@ source https://nuget.org/api/v2
 
 nuget Nuget.CommandLine
 nuget FAKE
-nuget FSharp.Formatting
+nuget FSharp.Formatting >= 3.0.0-beta01
 nuget FSharp.Core >= 3.1.2.5 lowest_matching:true, redirects:force
 nuget RazorEngine
 nuget NUnit = 2.6.4
@@ -24,6 +24,7 @@ group Standard
     nuget System.Reflection.TypeExtensions
     nuget System.Data.SqlClient
     nuget System.Data.Common
+    nuget System.Data.Odbc
 	nuget Microsoft.Data.SQLite
 	nuget FSharp.Compiler.Service
 
@@ -39,7 +40,7 @@ group SourceFiles
 group Scripts
     source https://nuget.org/api/v2
 
-    nuget MySql.Data
+    nuget MySql.Data < 7.0.0
     nuget MySqlConnector
     nuget Newtonsoft.Json
     nuget Npgsql

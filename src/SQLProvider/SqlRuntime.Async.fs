@@ -22,7 +22,18 @@ module AsyncOperations =
                 return yieldseq en
             | c ->
                 let en = c.GetEnumerator()
-                return yieldseq en
+                let source = 
+                    match en.GetType() with
+                    | null -> null
+                    | x -> x.GetField("source", System.Reflection.BindingFlags.NonPublic ||| System.Reflection.BindingFlags.Instance)
+                if source <> null then
+                    match source.GetValue en with
+                    | :? IAsyncEnumerable as coll ->
+                        do! coll.EvaluateQuery()
+                        return yieldseq en
+                    | c -> return yieldseq en
+                else 
+                    return yieldseq en
         }
 
     let private fetchTakeOne (s:Linq.IQueryable<'T>) =
@@ -62,15 +73,9 @@ module AsyncOperations =
             match s with
             | :? IWithSqlService as svc ->
                 match svc.SqlExpression with
-                | Projection(MethodCall(None, _, [SourceWithQueryData source; OptionalQuote (Lambda([ParamName param], SqlColumnGet(entity,op,_))) ]),_) ->
+                | Projection(MethodCall(None, _, [SourceWithQueryData source; OptionalQuote (Lambda([ParamName param], OptionalConvertOrTypeAs(SqlColumnGet(entity,op,_)))) ]),_) ->
                     
-                    let key = 
-                        let rec getBaseCol x =
-                            match x with
-                            | KeyColumn k -> k
-                            | CanonicalOperation(_, c) -> getBaseCol c
-                            | GroupColumn(_, c) -> getBaseCol c
-                        getBaseCol op
+                    let key = Utilities.getBaseColumnName op
 
                     let alias =
                             match entity with
@@ -85,7 +90,9 @@ module AsyncOperations =
                             | "Max" -> MaxOp(key)
                             | "Count" -> CountOp(key)
                             | "Min" -> MinOp(key)
-                            | "Average" -> AvgOp(key)
+                            | "Average" | "Avg" -> AvgOp(key)
+                            | "StdDev" | "StDev" | "StandardDeviation" -> StdDevOp(key)
+                            | "Variance" -> VarianceOp(key)
                             | _ -> failwithf "Unsupported aggregation `%s` in execution expression `%s`" agg (source.SqlExpression.ToString())
 
                         match source.SqlExpression with
@@ -120,6 +127,10 @@ module Seq =
     let minAsync<'T when 'T : comparison> : System.Linq.IQueryable<'T> -> Async<'T>  = getAggAsync "Min"
     /// Execute SQLProvider query to get the avg of elements, and release the OS thread while query is being executed.
     let averageAsync<'T when 'T : comparison> : System.Linq.IQueryable<'T> -> Async<'T>  = getAggAsync "Average"
+    /// Execute SQLProvider query to get the standard deviation of elements, and release the OS thread while query is being executed.
+    let stdDevAsync<'T when 'T : comparison> : System.Linq.IQueryable<'T> -> Async<'T>  = getAggAsync "StdDev"
+    /// Execute SQLProvider query to get the variance of elements, and release the OS thread while query is being executed.
+    let varianceAsync<'T when 'T : comparison> : System.Linq.IQueryable<'T> -> Async<'T>  = getAggAsync "Variance"
     /// WARNING! Execute SQLProvider DELETE FROM query to remove elements from the database.
     let ``delete all items from single table``<'T> : System.Linq.IQueryable<'T> -> Async<int> = function 
         | :? IWithSqlService as source ->
@@ -135,17 +146,8 @@ module Array =
     let executeQueryAsync query = async { let! x = executeAsync query in return x |> Seq.toArray }
 
 module List =
-    /// Execute SQLProvider query and release the OS thread while query is being executed.
-    let executeQueryAsync query = async { let! x = executeAsync query in return x |> Seq.toList }
     /// Helper function to run async computation non-parallel style for list of objects.
     /// This is needed if async database opreation is executed for a list of entities.
-    let evaluateOneByOne asyncFunc entityList =
-        let rec executeOneByOne' asyncFunc entityList acc =
-            match entityList with
-            | [] -> async { return acc }
-            | h::t -> 
-                async {
-                    let! res = asyncFunc h
-                    return! executeOneByOne' asyncFunc t (res::acc)
-                }
-        executeOneByOne' asyncFunc entityList []
+    let evaluateOneByOne = Sql.evaluateOneByOne 
+    /// Execute SQLProvider query and release the OS thread while query is being executed.
+    let executeQueryAsync query = async { let! x = executeAsync query in return x |> Seq.toList }

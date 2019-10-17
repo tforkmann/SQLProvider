@@ -1,4 +1,4 @@
-﻿namespace FSharp.Data.Sql.Providers
+namespace FSharp.Data.Sql.Providers
 
 open System
 open System.Collections.Concurrent
@@ -126,57 +126,31 @@ module Firebird =
     let mutable findClrType : (string -> TypeMapping option)  = fun _ -> failwith "!"
     let mutable findDbType : (string -> TypeMapping option)  = fun _ -> failwith "!"
 
-    let rec fieldNotation (al:alias) (c:SqlColumnType) =
-        let colSprint = 
-            match String.IsNullOrEmpty(al) with
-            | true -> sprintf "%s"
-            | false -> sprintf "%s.%s" al
-        match c with
-        // Custom database spesific overrides for canonical functions:
-        | SqlColumnType.CanonicalOperation(cf,col) ->
-            let column = fieldNotation al col
-            match cf with
-            // String functions
-            | Replace(SqlStr(searchItm),SqlStrCol(al2, col2)) -> sprintf "REPLACE(%s,'%s',%s)" column searchItm (fieldNotation al2 col2)
-            | Replace(SqlStrCol(al2, col2),SqlStr(toItm)) -> sprintf "REPLACE(%s,%s,'%s')" column (fieldNotation al2 col2) toItm
-            | Replace(SqlStrCol(al2, col2),SqlStrCol(al3, col3)) -> sprintf "REPLACE(%s,%s,%s)" column (fieldNotation al2 col2) (fieldNotation al3 col3)
-            | Substring(SqlInt startPos) -> sprintf "SUBSTR(%s FROM %i)" column startPos
-            | Substring(SqlIntCol(al2, col2)) -> sprintf "SUBSTR(%s FROM %s)" column (fieldNotation al2 col2)
-            | SubstringWithLength(SqlInt startPos,SqlInt strLen) -> sprintf "SUBSTR(%s FROM %i FOR %i)" column startPos strLen
-            | SubstringWithLength(SqlInt startPos,SqlIntCol(al2, col2)) -> sprintf "SUBSTR(%s FROM %i FOR %s)" column startPos (fieldNotation al2 col2)
-            | SubstringWithLength(SqlIntCol(al2, col2),SqlInt strLen) -> sprintf "SUBSTR(%s FROM %s FOR %i)" column (fieldNotation al2 col2) strLen
-            | SubstringWithLength(SqlIntCol(al2, col2),SqlIntCol(al3, col3)) -> sprintf "SUBSTR(%s FROM %s FOR %s)" column (fieldNotation al2 col2) (fieldNotation al3 col3)
-            | Trim -> sprintf "TRIM(%s)" column
-            | Length -> sprintf "CHAR_LENGTH(%s)" column
-            | IndexOf(SqlStr search) -> sprintf "POSITION('%s',%s)" search column
-            | IndexOf(SqlStrCol(al2, col2)) -> sprintf "POSITION(%s,%s)" (fieldNotation al2 col2) column
-            | IndexOfStart(SqlStr(search),(SqlInt startPos)) -> sprintf "POSITION('%s',%s,%d)" search column startPos
-            | IndexOfStart(SqlStr(search),SqlIntCol(al2, col2)) -> sprintf "POSITION('%s',%s,%s)" search column (fieldNotation al2 col2)
-            | IndexOfStart(SqlStrCol(al2, col2),(SqlInt startPos)) -> sprintf "POSITION(%s,%s,%d)" (fieldNotation al2 col2) column startPos
-            | IndexOfStart(SqlStrCol(al2, col2),SqlIntCol(al3, col3)) -> sprintf "POSITION(%s,%s,%s)" (fieldNotation al2 col2) column (fieldNotation al3 col3)
-            // Date functions
-            | Date -> sprintf "CAST (%s AS DATE)" column
-            | Year -> sprintf "EXTRACT(YEAR FROM %s)" column
-            | Month -> sprintf "EXTRACT(MONTH FROM %s)" column
-            | Day -> sprintf "EXTRACT(DAY FROM %s)" column
-            | Hour -> sprintf "EXTRACT(HOUR FROM %s)" column
-            | Minute -> sprintf "EXTRACT(MINUTE FROM %s)" column
-            | Second -> sprintf "EXTRACT(SECOND FROM %s)" column
-            | AddYears(SqlInt x) -> sprintf "DATEADD(%d YEAR TO %s)" x column
-            | AddYears(SqlIntCol(al2, col2)) -> sprintf "DATEADD(%s YEAR TO %s)" (fieldNotation al2 col2) column
-            | AddMonths x -> sprintf "DATEADD(%d MONTH TO %s)" x column
-            | AddDays(SqlFloat x) -> sprintf "DATEADD(%f DAY TO %s)" x column // SQL ignores decimal part :-(
-            | AddDays(SqlNumCol(al2, col2)) -> sprintf "DATEADD(%s DAY TO %s)" (fieldNotation al2 col2) column
-            | AddHours x -> sprintf "DATEADD(%f HOUR TO %s)" x column
-            | AddMinutes(SqlFloat x) -> sprintf "DATEADD(%f MINUTE TO %s)" x column
-            | AddMinutes(SqlNumCol(al2, col2)) -> sprintf "DATEADD(%s MINUTE TO %s)" (fieldNotation al2 col2) column
-            | AddSeconds x -> sprintf "DATEADD(%f SECOND TO %s)" x column
-            // Math functions
-            | Truncate -> sprintf "TRUNC(%s)" column
-            | BasicMathOfColumns(o, a, c) -> sprintf "(%s %s %s)" column o (fieldNotation a c)
-            | BasicMath(o, par) when (par :? String || par :? Char) -> sprintf "(%s %s '%O')" column o par            
-            | _ -> Utilities.genericFieldNotation (fieldNotation al) colSprint c
-        | _ -> Utilities.genericFieldNotation (fieldNotation al) colSprint c
+    let createCommandParameter sprocCommand (param:QueryParameter) value =
+        let mapping = if value <> null && (not sprocCommand) then (findClrType (value.GetType().ToString())) else None
+        let value = if value = null then (box System.DBNull.Value) else value
+
+        let parameterType = parameterType.Value
+        let firebirdDbTypeSetter =
+            parameterType.GetProperty("FbDbType").GetSetMethod()
+
+        let p = Activator.CreateInstance(parameterType,[|box param.Name;value|]) :?> IDbDataParameter
+
+        p.Direction <-  param.Direction
+
+        p.DbType <- (defaultArg mapping param.TypeMapping).DbType
+        param.TypeMapping.ProviderType |> Option.iter (fun pt -> firebirdDbTypeSetter.Invoke(p, [|pt|]) |> ignore)
+
+        Option.iter (fun l -> p.Size <- l) param.Length
+        p
+
+    let createParam name i v = 
+        match v with
+        | null -> QueryParameter.Create(name, i) 
+        | value -> 
+            match findClrType (value.GetType().FullName) with
+            | None -> QueryParameter.Create(name, i) 
+            | Some typemap -> QueryParameter.Create(name, i, typemap)
 
     let fieldNotationAlias(al:alias,col:SqlColumnType) =
         let aliasSprint =
@@ -187,14 +161,6 @@ module Firebird =
 
     let ripQuotes (str:String) = 
         (if str.Contains(" ") then str.Replace("\"","") else str)
-
-    let createParam name i v = 
-        match v with
-        | null -> QueryParameter.Create(name, i) 
-        | value -> 
-            match findClrType (value.GetType().FullName) with
-            | None -> QueryParameter.Create(name, i) 
-            | Some typemap -> QueryParameter.Create(name, i, typemap)
 
     let createTypeMappings con =
         let dt = getSchema "DataTypes" [||] con
@@ -252,24 +218,6 @@ module Firebird =
 
     let createCommand commandText connection =
         Activator.CreateInstance(commandType.Value,[|box commandText;box connection|]) :?> IDbCommand
-
-    let createCommandParameter sprocCommand (param:QueryParameter) value =
-        let mapping = if value <> null && (not sprocCommand) then (findClrType (value.GetType().ToString())) else None
-        let value = if value = null then (box System.DBNull.Value) else value
-
-        let parameterType = parameterType.Value
-        let firebirdDbTypeSetter =
-            parameterType.GetProperty("FbDbType").GetSetMethod()
-
-        let p = Activator.CreateInstance(parameterType,[|box param.Name;value|]) :?> IDbDataParameter
-
-        p.Direction <-  param.Direction
-
-        p.DbType <- (defaultArg mapping param.TypeMapping).DbType
-        param.TypeMapping.ProviderType |> Option.iter (fun pt -> firebirdDbTypeSetter.Invoke(p, [|pt|]) |> ignore)
-
-        Option.iter (fun l -> p.Size <- l) param.Length
-        p
 
     let getSprocReturnCols (sparams: QueryParameter list) =
         match sparams |> List.filter (fun p -> p.Direction <> ParameterDirection.Input) with
@@ -372,6 +320,32 @@ module Firebird =
             par.Value
         else null
 
+
+    let processReturnColumn reader (outps:(int*IDbDataParameter)[]) (retCol:QueryParameter) =
+        match retCol.TypeMapping.ProviderTypeName with
+        | Some "cursor" ->
+            let result = ResultSet(retCol.Name, Sql.dataReaderToArray reader)
+            reader.NextResult() |> ignore
+            result
+        | _ ->
+            match outps |> Array.tryFind (fun (_,p) -> p.ParameterName = retCol.Name) with
+            | Some(_,p) -> ScalarResultSet(p.ParameterName, readParameter p)
+            | None -> failwithf "Excepted return column %s but could not find it in the parameter set" retCol.Name
+
+    let processReturnColumnAsync reader (outps:(int*IDbDataParameter)[]) (retCol:QueryParameter) =
+        async {
+            match retCol.TypeMapping.ProviderTypeName with
+            | Some "cursor" ->
+                let! r = Sql.dataReaderToArrayAsync reader
+                let result = ResultSet(retCol.Name, r)
+                let! _ = reader.NextResultAsync() |> Async.AwaitTask
+                return result
+            | _ ->
+                match outps |> Array.tryFind (fun (_,p) -> p.ParameterName = retCol.Name) with
+                | Some(_,p) -> return ScalarResultSet(p.ParameterName, readParameter p)
+                | None -> return failwithf "Excepted return column %s but could not find it in the parameter set" retCol.Name
+        }
+
     let executeSprocCommandCommon (inputParams:QueryParameter [])  (retCols:QueryParameter[]) (values:obj[]) =
 
         let inputParameters = inputParams |> Array.filter (fun p -> p.Direction = ParameterDirection.Input)
@@ -392,22 +366,11 @@ module Firebird =
             Array.append outps inps
             |> Array.sortBy fst
 
-        let processReturnColumn reader (retCol:QueryParameter) =
-            match retCol.TypeMapping.ProviderTypeName with
-            | Some "cursor" ->
-                let result = ResultSet(retCol.Name, Sql.dataReaderToArray reader)
-                reader.NextResult() |> ignore
-                result
-            | _ ->
-                match outps |> Array.tryFind (fun (_,p) -> p.ParameterName = retCol.Name) with
-                | Some(_,p) -> ScalarResultSet(p.ParameterName, readParameter p)
-                | None -> failwithf "Excepted return column %s but could not find it in the parameter set" retCol.Name
-
-        allParams, processReturnColumn, outps
+        allParams, outps
 
     let executeSprocCommand (com:IDbCommand) (inputParams:QueryParameter[]) (retCols:QueryParameter[]) (values:obj[]) =
 
-        let allParams, processReturnColumn, outps = executeSprocCommandCommon inputParams retCols values
+        let allParams, outps = executeSprocCommandCommon inputParams retCols values
         allParams |> Array.iter (fun (_,p) -> com.Parameters.Add(p) |> ignore)
 
         match retCols with
@@ -425,11 +388,11 @@ module Firebird =
                 | None -> failwithf "Excepted return column %s but could not find it in the parameter set" retCol.Name
         | cols ->
             use reader = com.ExecuteReader()
-            Set(cols |> Array.map (processReturnColumn reader))
+            Set(cols |> Array.map (processReturnColumn reader outps))
 
     let executeSprocCommandAsync (com:System.Data.Common.DbCommand) (inputParams:QueryParameter[]) (retCols:QueryParameter[]) (values:obj[]) =
         async {
-            let allParams, processReturnColumn, outps = executeSprocCommandCommon inputParams retCols values
+            let allParams, outps = executeSprocCommandCommon inputParams retCols values
             allParams |> Array.iter (fun (_,p) -> com.Parameters.Add(p) |> ignore)
 
             match retCols with
@@ -439,8 +402,9 @@ module Firebird =
                 use! reader = com.ExecuteReaderAsync() |> Async.AwaitTask
                 match retCol.TypeMapping.ProviderTypeName with
                 | Some "cursor" ->
-                    let result = SingleResultSet(retCol.Name, Sql.dataReaderToArray reader)
-                    reader.NextResult() |> ignore
+                    let! r = Sql.dataReaderToArrayAsync reader
+                    let result = SingleResultSet(retCol.Name, r)
+                    let! _ = reader.NextResultAsync() |> Async.AwaitTask
                     return result
                 | _ ->
                     match outps |> Array.tryFind (fun (_,p) -> p.ParameterName = retCol.Name) with
@@ -448,14 +412,13 @@ module Firebird =
                     | None -> return failwithf "Excepted return column %s but could not find it in the parameter set" retCol.Name
             | cols ->
                 use! reader = com.ExecuteReaderAsync() |> Async.AwaitTask
-                return Set(cols |> Array.map (processReturnColumn reader))
+                let! r = cols |> Array.toList |> Sql.evaluateOneByOne (processReturnColumnAsync reader outps)
+                return Set(r)
         }
 
-type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quoteChar: OdbcQuoteCharacter) as this =
-    let pkLookup = ConcurrentDictionary<string,string list>()
-    let tableLookup = ConcurrentDictionary<string,Table>()
-    let columnLookup = ConcurrentDictionary<string,ColumnLookup>()
-    let relationshipLookup = ConcurrentDictionary<string,Relationship list * Relationship list>()
+type internal FirebirdProvider(resolutionPath, contextSchemaPath, owner, referencedAssemblies, quoteChar: OdbcQuoteCharacter) as this =
+    let schemaCache = SchemaCache.LoadOrEmpty(contextSchemaPath)
+    let myLock = new Object()
 
     let getTableNameForQuery (table:Table) =
         match quoteChar with
@@ -482,7 +445,7 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
             |> Array.unzip
 
         sb.Clear() |> ignore
-        let (hasPK, pks) =  pkLookup.TryGetValue(entity.Table.Name)
+        let (hasPK, pks) =  schemaCache.PrimaryKeys.TryGetValue(entity.Table.Name)
 
         ~~(sprintf "INSERT INTO %s (%s) VALUES (%s) %s;" 
             (getTableNameForQuery entity.Table)
@@ -498,8 +461,8 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
         let (~~) (t:string) = sb.Append t |> ignore
         let cmd = (this :> ISqlProvider).CreateCommand(con,"")
         cmd.Connection <- con
-        let haspk = pkLookup.ContainsKey(entity.Table.Name)
-        let pk = if haspk then pkLookup.[entity.Table.Name] else []
+        let haspk = schemaCache.PrimaryKeys.ContainsKey(entity.Table.Name)
+        let pk = if haspk then schemaCache.PrimaryKeys.[entity.Table.Name] else []
         sb.Clear() |> ignore
 
         match pk with
@@ -546,8 +509,8 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
         let cmd = (this :> ISqlProvider).CreateCommand(con,"")
         cmd.Connection <- con
         sb.Clear() |> ignore
-        let haspk = pkLookup.ContainsKey(entity.Table.Name)
-        let pk = if haspk then pkLookup.[entity.Table.Name] else []
+        let haspk = schemaCache.PrimaryKeys.ContainsKey(entity.Table.Name)
+        let pk = if haspk then schemaCache.PrimaryKeys.[entity.Table.Name] else []
         sb.Clear() |> ignore
         let pkValues =
             match entity.GetPkColumnOption<obj> pk with
@@ -572,6 +535,7 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
         Firebird.referencedAssemblies <- referencedAssemblies
 
     interface ISqlProvider with
+        member __.GetLockObject() = myLock
         member __.GetTableDescription(con,tableName) = 
             let sn = tableName.Substring(0,tableName.LastIndexOf(".")) 
             let tn = tableName.Substring(tableName.LastIndexOf(".")+1) 
@@ -591,7 +555,7 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
             let sn = tableName.Substring(0,tableName.LastIndexOf(".")) 
             let tn = tableName.Substring(tableName.LastIndexOf(".")+1) 
             let baseQuery = @"SELECT RDB$DESCRIPTION 
-                                FROM INFORMATION_SCHEMA.COLUMNS
+                                FROM RDB$RELATION_FIELDS
                                 WHERE RDB$RELATION_NAME = @table AND RDB$FIELD_NAME = @column"
             use com = (this:>ISqlProvider).CreateCommand(con,baseQuery)
             //com.Parameters.Add((this:>ISqlProvider).CreateCommandParameter(QueryParameter.Create("@schema", 0), sn)) |> ignore
@@ -609,6 +573,7 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
         member __.ExecuteSprocCommand(com,definition,retCols,values) = Firebird.executeSprocCommand com definition retCols values
         member __.ExecuteSprocCommandAsync(com,definition,retCols,values) = Firebird.executeSprocCommandAsync com definition retCols values
         member __.CreateTypeMappings(con) = Sql.connect con Firebird.createTypeMappings
+        member __.GetSchemaCache() = schemaCache
 
         member __.GetTables(con,cs) =
             let dbName = if String.IsNullOrEmpty owner then con.Database else owner
@@ -623,28 +588,29 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                 use reader = Firebird.executeSql Firebird.createCommand (sprintf "select 'Dbo', trim(RDB$RELATION_NAME), 'BASE TABLE' from RDB$RELATIONS") con
                 [ while reader.Read() do
                     let table ={ Schema = reader.GetString(0); Name = reader.GetString(1).Trim(); Type=reader.GetString(2) }
-                    yield tableLookup.GetOrAdd(table.Name,table) ])
+                    yield schemaCache.Tables.GetOrAdd(table.Name,table) ])
 
         member __.GetPrimaryKey(table) =
-            match pkLookup.TryGetValue table.Name with
+            match schemaCache.PrimaryKeys.TryGetValue table.Name with
             | true, [v] -> Some v
             | _ -> None
 
         member __.GetColumns(con,table) =
-            match columnLookup.TryGetValue table.Name with
+            match schemaCache.Columns.TryGetValue table.Name with
             | (true,data) when data.Count > 0 -> data
             | _ ->
                 // note this data can be obtained using con.GetSchema, but with an epic schema we only want to get the data
                 // we are interested in on demand
                 let baseQuery = sprintf @"SELECT DISTINCT trim(c.RDB$FIELD_NAME) COLUMN_NAME,
-                                                %s DATA_TYPE, f.RDB$CHARACTER_LENGTH character_maximum_length
+                                                trim(%s) DATA_TYPE, f.RDB$CHARACTER_LENGTH character_maximum_length
                                                 , f.RDB$FIELD_PRECISION numeric_precision, c.RDB$NULL_FLAG is_nullable,
                                                CASE WHEN c.RDB$FIELD_NAME in 
                                                    (select i.RDB$FIELD_NAME from RDB$INDEX_SEGMENTS i
                                                     inner join RDB$RELATION_CONSTRAINTS rc on rc.RDB$INDEX_NAME=i.RDB$INDEX_NAME and rc.RDB$RELATION_NAME=c.RDB$RELATION_NAME
                                                    where rc.RDB$CONSTRAINT_TYPE='PRIMARY KEY')
                                                  THEN 'PRIMARY KEY'
-                                               ELSE '' END AS KeyType
+                                               ELSE '' END AS KeyType,
+                                               c.RDB$DEFAULT_VALUE has_default
                                   FROM rdb$relation_fields c
                                   inner join RDB$FIELDS f on f.RDB$FIELD_NAME=c.RDB$FIELD_SOURCE                                  
                                   
@@ -662,14 +628,17 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                             else reader.GetValue(2).ToString()
                         match Firebird.findDbType dt with
                         | Some(m) ->
+                            let pkColumn = if reader.GetString(5) = "PRIMARY KEY" then true else false 
                             let col =
                                 { Column.Name = reader.GetString(0)
                                   TypeMapping = m
                                   IsNullable = let b = reader.GetString(4) in if b = "1" then false else true
-                                  IsPrimaryKey = if reader.GetString(5) = "PRIMARY KEY" then true else false 
+                                  IsPrimaryKey = pkColumn
+                                  IsAutonumber = pkColumn
+                                  HasDefault = not(reader.IsDBNull 6)
                                   TypeInfo = if String.IsNullOrEmpty(maxlen) then Some dt else Some (dt + "(" + maxlen + ")")}
                             if col.IsPrimaryKey then 
-                                pkLookup.AddOrUpdate(table.Name, [col.Name], fun key old -> 
+                                schemaCache.PrimaryKeys.AddOrUpdate(table.Name, [col.Name], fun key old -> 
                                     match col.Name with 
                                     | "" -> old 
                                     | x -> match old with
@@ -680,10 +649,10 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                         | _ -> ()]
                     |> Map.ofList
                 con.Close()
-                columnLookup.AddOrUpdate(table.Name, columns, fun x old -> match columns.Count with 0 -> old | x -> columns)
+                schemaCache.Columns.AddOrUpdate(table.Name, columns, fun x old -> match columns.Count with 0 -> old | x -> columns)
 
         member __.GetRelationships(con,table) =
-          relationshipLookup.GetOrAdd(table.Name, fun name ->
+          schemaCache.Relationships.GetOrAdd(table.Name, fun name ->
             let baseQuery = @"SELECT
                                  trim(rc.RDB$CONSTRAINT_NAME) AS FK_CONSTRAINT_NAME
                                 ,trim(RC.RDB$RELATION_NAME) AS FK_TABLE_NAME
@@ -718,9 +687,211 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
         member __.GetIndividualsQueryText(table,amount) = sprintf "SELECT first %i * FROM %s;" amount (getTableNameForQuery table)
         member __.GetIndividualQueryText(table,column) = sprintf "SELECT * FROM %s WHERE %s.%s = @id" (getTableNameForQuery table) (getTableNameForQuery table) column
 
-        member this.GenerateQueryText(sqlQuery,baseAlias,baseTable,projectionColumns, isDeleteScript) =
-            let sb = System.Text.StringBuilder()
+        member this.GenerateQueryText(sqlQuery,baseAlias,baseTable,projectionColumns, isDeleteScript, con) =
             let parameters = ResizeArray<_>()
+
+            // make this nicer later.. just try and get the damn thing to work properly (well, at all) for now :D
+            // NOTE: really need to assign the parameters their correct sql types
+            let param = ref 0
+            let nextParam() =
+                incr param
+                sprintf "@param%i" !param
+
+            let createParamet (value:obj) =
+                let paramName = nextParam()
+                Firebird.createCommandParameter false (Firebird.createParam paramName !param value) value
+
+            let rec fieldNotation (al:alias) (c:SqlColumnType) =
+                let buildf (c:Condition)= 
+                    let sb = System.Text.StringBuilder()
+                    let (~~) (t:string) = sb.Append t |> ignore
+                    filterBuilder (~~) [c]
+                    sb.ToString()
+                let colSprint = 
+                    match String.IsNullOrEmpty(al) with
+                    | true -> sprintf "%s"
+                    | false -> sprintf "%s.%s" al
+
+                let fieldParam (value:obj) =
+                    let p = createParamet value
+                    parameters.Add p
+                    p.ParameterName
+
+                match c with
+                // Custom database spesific overrides for canonical functions:
+                | SqlColumnType.CanonicalOperation(cf,col) ->
+                    let column = fieldNotation al col
+                    match cf with
+                    // String functions
+                    | Replace(SqlConstant searchItm,SqlCol(al2, col2)) -> sprintf "REPLACE(%s,%s,%s)" column (fieldParam searchItm) (fieldNotation al2 col2)
+                    | Replace(SqlCol(al2, col2), SqlConstant toItm) -> sprintf "REPLACE(%s,%s,%s)" column (fieldNotation al2 col2) (fieldParam toItm)
+                    | Replace(SqlCol(al2, col2),SqlCol(al3, col3)) -> sprintf "REPLACE(%s,%s,%s)" column (fieldNotation al2 col2) (fieldNotation al3 col3)
+                    | Replace(SqlConstant searchItm, SqlConstant toItm) -> sprintf "REPLACE(%s,%s,%s)" column (fieldParam searchItm) (fieldParam toItm)
+                    | Substring(SqlConstant startPos) -> sprintf "SUBSTR(%s FROM %s)" column (fieldParam startPos)
+                    | Substring(SqlCol(al2, col2)) -> sprintf "SUBSTR(%s FROM %s)" column (fieldNotation al2 col2)
+                    | SubstringWithLength(SqlConstant startPos, SqlConstant strLen) -> sprintf "SUBSTR(%s FROM %s FOR %s)" column (fieldParam startPos) (fieldParam strLen)
+                    | SubstringWithLength(SqlConstant startPos,SqlCol(al2, col2)) -> sprintf "SUBSTR(%s FROM %s FOR %s)" column (fieldParam startPos) (fieldNotation al2 col2)
+                    | SubstringWithLength(SqlCol(al2, col2), SqlConstant strLen) -> sprintf "SUBSTR(%s FROM %s FOR %s)" column (fieldNotation al2 col2) (fieldParam strLen)
+                    | SubstringWithLength(SqlCol(al2, col2),SqlCol(al3, col3)) -> sprintf "SUBSTR(%s FROM %s FOR %s)" column (fieldNotation al2 col2) (fieldNotation al3 col3)
+                    | Trim -> sprintf "TRIM(%s)" column
+                    | Length -> sprintf "CHAR_LENGTH(%s)" column
+                    | IndexOf(SqlConstant search) -> sprintf "POSITION(%s,%s)" (fieldParam search) column
+                    | IndexOf(SqlCol(al2, col2)) -> sprintf "POSITION(%s,%s)" (fieldNotation al2 col2) column
+                    | IndexOfStart(SqlConstant search,(SqlConstant startPos)) -> sprintf "POSITION(%s,%s,%s)" (fieldParam search) column (fieldParam startPos)
+                    | IndexOfStart(SqlConstant search,SqlCol(al2, col2)) -> sprintf "POSITION(%s,%s,%s)" (fieldParam search) column (fieldNotation al2 col2)
+                    | IndexOfStart(SqlCol(al2, col2),(SqlConstant startPos)) -> sprintf "POSITION(%s,%s,%s)" (fieldNotation al2 col2) column (fieldParam startPos)
+                    | IndexOfStart(SqlCol(al2, col2),SqlCol(al3, col3)) -> sprintf "POSITION(%s,%s,%s)" (fieldNotation al2 col2) column (fieldNotation al3 col3)
+                    | CastVarchar -> sprintf "CAST(%s AS CHAR)" column
+                    // Date functions
+                    | Date -> sprintf "CAST (%s AS DATE)" column
+                    | Year -> sprintf "EXTRACT(YEAR FROM %s)" column
+                    | Month -> sprintf "EXTRACT(MONTH FROM %s)" column
+                    | Day -> sprintf "EXTRACT(DAY FROM %s)" column
+                    | Hour -> sprintf "EXTRACT(HOUR FROM %s)" column
+                    | Minute -> sprintf "EXTRACT(MINUTE FROM %s)" column
+                    | Second -> sprintf "EXTRACT(SECOND FROM %s)" column
+                    | DateDiffDays(SqlCol(al2, col2)) -> sprintf "DATEDIFF(DAY, %s, %s)" (fieldNotation al2 col2) column
+                    | DateDiffSecs(SqlCol(al2, col2)) -> sprintf "DATEDIFF(SECOND, %s, %s)" (fieldNotation al2 col2) column
+                    | DateDiffDays(SqlConstant x) -> sprintf "DATEDIFF(DAY, %s, %s)" (fieldParam x) column
+                    | DateDiffSecs(SqlConstant x) -> sprintf "DATEDIFF(SECOND, %s, %s)" (fieldParam x) column
+                    //Todo: Check if these support parameters. If not, use Utilities.fieldConstant instead of fieldParam
+                    | AddYears(SqlConstant x) -> sprintf "DATEADD(%s YEAR TO %s)" (fieldParam x) column
+                    | AddYears(SqlCol(al2, col2)) -> sprintf "DATEADD(%s YEAR TO %s)" (fieldNotation al2 col2) column
+                    | AddMonths x -> sprintf "DATEADD(%d MONTH TO %s)" x column
+                    | AddDays(SqlConstant x) -> sprintf "DATEADD(%s DAY TO %s)" (fieldParam x) column // SQL ignores decimal part :-(
+                    | AddDays(SqlCol(al2, col2)) -> sprintf "DATEADD(%s DAY TO %s)" (fieldNotation al2 col2) column
+                    | AddHours x -> sprintf "DATEADD(%f HOUR TO %s)" x column
+                    | AddMinutes(SqlConstant x) -> sprintf "DATEADD(%s MINUTE TO %s)" (fieldParam x) column
+                    | AddMinutes(SqlCol(al2, col2)) -> sprintf "DATEADD(%s MINUTE TO %s)" (fieldNotation al2 col2) column
+                    | AddSeconds x -> sprintf "DATEADD(%f SECOND TO %s)" x column
+                    //| AddYears(SqlConstant x) -> sprintf "DATEADD(%d YEAR TO %s)" x column
+                    //| AddYears(SqlCol(al2, col2)) -> sprintf "DATEADD(%s YEAR TO %s)" (fieldNotation al2 col2) column
+                    //| AddMonths x -> sprintf "DATEADD(%d MONTH TO %s)" x column
+                    //| AddDays(SqlConstant x) -> sprintf "DATEADD(%f DAY TO %s)" x column // SQL ignores decimal part :-(
+                    //| AddDays(SqlCol(al2, col2)) -> sprintf "DATEADD(%s DAY TO %s)" (fieldNotation al2 col2) column
+                    //| AddHours x -> sprintf "DATEADD(%f HOUR TO %s)" x column
+                    //| AddMinutes(SqlConstant x) -> sprintf "DATEADD(%f MINUTE TO %s)" x column
+                    //| AddMinutes(SqlCol(al2, col2)) -> sprintf "DATEADD(%s MINUTE TO %s)" (fieldNotation al2 col2) column
+                    //| AddSeconds x -> sprintf "DATEADD(%f SECOND TO %s)" x column
+                    // Math functions
+                    | Truncate -> sprintf "TRUNC(%s)" column
+                    | BasicMathOfColumns(o, a, c) -> sprintf "(%s %s %s)" column o (fieldNotation a c)
+                    | BasicMath(o, par) when (par :? String || par :? Char) -> sprintf "(%s %s %s)" column o (fieldParam par) 
+                    | BasicMathLeft(o, par) when (par :? String || par :? Char) -> sprintf "(%s %s %s)" (fieldParam par) o column
+                    | Greatest(SqlConstant x) -> sprintf "GREATEST(%s, %s)" (fieldParam x) column
+                    | Greatest(SqlCol(al2, col2)) -> sprintf "GREATEST(%s, %s)" (fieldNotation al2 col2) column
+                    | Least(SqlConstant x) -> sprintf "LEAST(%s, %s)" (fieldParam x) column
+                    | Least(SqlCol(al2, col2)) -> sprintf "LEAST(%s, %s)" (fieldNotation al2 col2) column
+                    | Pow(SqlCol(al2, col2)) -> sprintf "POWER(%s, %s)" column (fieldNotation al2 col2)
+                    | Pow(SqlConstant x) -> sprintf "POWER(%s, %s)" column (fieldParam x)
+                    | PowConst(SqlConstant x) -> sprintf "POWER(%s, %s)" (fieldParam x) column
+                    //if-then-else
+                    | CaseSql(f, SqlCol(al2, col2)) -> sprintf "CASE WHEN %s THEN %s ELSE %s END " (buildf f) column (fieldNotation al2 col2)
+                    | CaseSql(f, SqlConstant itm) -> sprintf "CASE WHEN %s THEN %s ELSE %s END " (buildf f) column (fieldParam itm)
+                    | CaseNotSql(f, SqlConstant itm) -> sprintf "CASE WHEN %s THEN %s ELSE %s END " (buildf f) (fieldParam itm) column
+                    | CaseSqlPlain(f, itm, itm2) -> sprintf "CASE WHEN %s THEN %s ELSE %s END " (buildf f) (fieldParam itm) (fieldParam itm2)
+                    | _ -> Utilities.genericFieldNotation (fieldNotation al) colSprint c
+                | _ -> Utilities.genericFieldNotation (fieldNotation al) colSprint c
+
+            and filterBuilder (~~) (f:Condition list) =
+
+                // next up is the filter expressions
+                let rec filterBuilder' = function
+                    | [] -> ()
+                    | (cond::conds) ->
+                        let build op preds (rest:Condition list option) =
+                            ~~ "("
+                            preds |> List.iteri( fun i (alias,col,operator,data) ->
+                                    let column = fieldNotation alias col
+                                    let extractData data =
+                                            match data with
+                                            | Some(x) when (box x :? System.Linq.IQueryable) -> [||]
+                                            | Some(x) when (box x :? obj array) ->
+                                                // in and not in operators pass an array
+                                                let elements = box x :?> obj array
+                                                Array.init (elements.Length) (fun i -> createParamet (elements.GetValue(i)))
+                                            | Some(x) -> [|createParamet (box x)|]
+                                            | None ->    [|createParamet DBNull.Value|]
+
+                                    let operatorIn operator (array : IDbDataParameter[]) =
+                                        if Array.isEmpty array then
+                                            match operator with
+                                            | FSharp.Data.Sql.In -> "1<>1" // nothing is in the empty set
+                                            | FSharp.Data.Sql.NotIn -> "1=1" // anything is not in the empty set
+                                            | _ -> failwith "Should not be called with any other operator"
+                                        else
+                                            let text = String.Join(",", array |> Array.map (fun p -> p.ParameterName))
+                                            Array.iter parameters.Add array
+                                            match operator with
+                                            | FSharp.Data.Sql.In -> sprintf "%s IN (%s)" column text
+                                            | FSharp.Data.Sql.NotIn -> sprintf "%s NOT IN (%s)" column text
+                                            | _ -> failwith "Should not be called with any other operator"
+
+                                    let prefix = if i>0 then (sprintf " %s " op) else ""
+                                    let paras = extractData data
+
+                                    let operatorInQuery operator (array : IDbDataParameter[]) =
+                                        let innersql, innerpars = data.Value |> box :?> string * IDbDataParameter[]
+                                        Array.iter parameters.Add innerpars
+                                        match operator with
+                                        | FSharp.Data.Sql.NestedIn -> sprintf "%s IN (%s)" column innersql
+                                        | FSharp.Data.Sql.NestedNotIn -> sprintf "%s NOT IN (%s)" column innersql
+                                        | FSharp.Data.Sql.NestedExists -> sprintf "EXISTS (%s)" innersql
+                                        | FSharp.Data.Sql.NestedNotExists -> sprintf "NOT EXISTS (%s)" innersql
+                                        | _ -> failwith "Should not be called with any other operator"
+
+                                    ~~(sprintf "%s%s" prefix <|
+                                        match operator with
+                                        | FSharp.Data.Sql.IsNull -> sprintf "%s IS NULL" column
+                                        | FSharp.Data.Sql.NotNull -> sprintf "%s IS NOT NULL" column
+                                        | FSharp.Data.Sql.In 
+                                        | FSharp.Data.Sql.NotIn -> operatorIn operator paras
+                                        | FSharp.Data.Sql.NestedExists
+                                        | FSharp.Data.Sql.NestedNotExists
+                                        | FSharp.Data.Sql.NestedIn 
+                                        | FSharp.Data.Sql.NestedNotIn -> operatorInQuery operator paras
+                                        | _ ->
+                                            let aliasformat = sprintf "%s %s %s" column
+                                            match data with 
+                                            | Some d when (box d :? alias * SqlColumnType) ->
+                                                let alias2, col2 = box d :?> (alias * SqlColumnType)
+                                                let alias2f = fieldNotation alias2 col2
+                                                aliasformat (operator.ToString()) alias2f
+                                            | _ ->
+                                                parameters.Add paras.[0]
+                                                aliasformat (operator.ToString()) paras.[0].ParameterName
+                            ))
+                            // there's probably a nicer way to do this
+                            let rec aux = function
+                                | x::[] when preds.Length > 0 ->
+                                    ~~ (sprintf " %s " op)
+                                    filterBuilder' [x]
+                                | x::[] -> filterBuilder' [x]
+                                | x::xs when preds.Length > 0 ->
+                                    ~~ (sprintf " %s " op)
+                                    filterBuilder' [x]
+                                    ~~ (sprintf " %s " op)
+                                    aux xs
+                                | x::xs ->
+                                    filterBuilder' [x]
+                                    ~~ (sprintf " %s " op)
+                                    aux xs
+                                | [] -> ()
+
+                            Option.iter aux rest
+                            ~~ ")"
+
+                        match cond with
+                        | Or(preds,rest) -> build "OR" preds rest
+                        | And(preds,rest) ->  build "AND" preds rest
+                        | ConstantTrue -> ~~ " (1=1) "
+                        | ConstantFalse -> ~~ " (1=0) "
+                        | NotSupported x ->  failwithf "Not supported: %O" x
+                        filterBuilder' conds
+                filterBuilder' f
+
+
+            let sb = System.Text.StringBuilder()
             let (~~) (t:string) = sb.Append t |> ignore
 
             // to simplfy (ha!) the processing, all tables should be aliased.
@@ -733,139 +904,41 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
 
             let singleEntity = sqlQuery.Aliases.Count = 0
 
-
             // build the sql query from the simplified abstract query expression
             // working on the basis that we will alias everything to make my life eaiser
-            // first build  the select statment, this is easy ...
+            // build the select statment, this is easy ...
             let selectcolumns =
                 if projectionColumns |> Seq.isEmpty then "1" else
                 String.Join(",",
                     [|for KeyValue(k,v) in projectionColumns do
-                        let cols = (getTable k).FullName
+                        let cols = (getTable k).Name
                         let k = if k <> "" then k elif baseAlias <> "" then baseAlias else baseTable.Name
                         if v.Count = 0 then   // if no columns exist in the projection then get everything
-                            for col in columnLookup.[cols] |> Seq.map (fun c -> c.Key) do
+                            for col in schemaCache.Columns.[cols] |> Seq.map (fun c -> c.Key) do
                                 if singleEntity then yield sprintf "%s.%s as %s" k col col
                                 else yield sprintf "%s.%s as %s_%s " k col k col
                         else
-                            for col in v do
-                                if singleEntity then yield sprintf "%s.%s as %s" k col col
-                                else yield sprintf "%s.%s as %s_%s" k col k col|]) // F# makes this so easy :)
+                            for colp in v |> Seq.distinct do
+                                match colp with
+                                | EntityColumn col ->
+                                    if singleEntity then yield sprintf "%s.%s as %s" k col col
+                                    else yield sprintf "%s.%s as %s_%s" k col k col // F# makes this so easy :)
+                                | OperationColumn(n,op) ->
+                                    yield sprintf "%s as [%s]" (fieldNotation k op) n|])
 
             // Create sumBy, minBy, maxBy, ... field columns
             let columns = 
                 let extracolumns =
                     match sqlQuery.Grouping with
-                    | [] -> FSharp.Data.Sql.Common.Utilities.parseAggregates Firebird.fieldNotation Firebird.fieldNotationAlias sqlQuery.AggregateOp
+                    | [] -> FSharp.Data.Sql.Common.Utilities.parseAggregates fieldNotation Firebird.fieldNotationAlias sqlQuery.AggregateOp
                     | g  -> 
-                        let keys = g |> List.map(fst) |> List.concat |> List.map(fun (a,c) -> Firebird.fieldNotation a c)
+                        let keys = g |> List.map(fst) |> List.concat |> List.map(fun (a,c) -> fieldNotation a c)
                         let aggs = g |> List.map(snd) |> List.concat
-                        let res2 = FSharp.Data.Sql.Common.Utilities.parseAggregates Firebird.fieldNotation Firebird.fieldNotationAlias aggs |> List.toSeq
-                        [String.Join(", ", keys) + (match aggs with [] -> "" | _ -> ", ") + String.Join(", ", res2)] 
+                        let res2 = FSharp.Data.Sql.Common.Utilities.parseAggregates fieldNotation Firebird.fieldNotationAlias aggs |> List.toSeq
+                        [String.Join(", ", keys) + (if List.isEmpty aggs || List.isEmpty keys then ""  else ", ") + String.Join(", ", res2)] 
                 match extracolumns with
                 | [] -> selectcolumns
                 | h::t -> h
-
-            // next up is the filter expressions
-            // make this nicer later.. just try and get the damn thing to work properly (well, at all) for now :D
-            // NOTE: really need to assign the parameters their correct sql types
-            let param = ref 0
-            let nextParam() =
-                incr param
-                sprintf "@param%i" !param
-
-            let createParam (value:obj) =
-                let paramName = nextParam()
-                (this:>ISqlProvider).CreateCommandParameter((Firebird.createParam paramName !param value), value)
-
-            let rec filterBuilder = function
-                | [] -> ()
-                | (cond::conds) ->
-                    let build op preds (rest:Condition list option) =
-                        ~~ "("
-                        preds |> List.iteri( fun i (alias,col,operator,data) ->
-                                let column = Firebird.fieldNotation alias col
-                                let extractData data =
-                                     match data with
-                                     | Some(x) when (box x :? System.Linq.IQueryable) -> [||]
-                                     | Some(x) when (box x :? obj array) ->
-                                         // in and not in operators pass an array
-                                         let elements = box x :?> obj array
-                                         Array.init (elements.Length) (fun i -> createParam (elements.GetValue(i)))
-                                     | Some(x) -> [|createParam (box x)|]
-                                     | None ->    [|createParam DBNull.Value|]
-
-                                let operatorIn operator (array : IDbDataParameter[]) =
-                                    if Array.isEmpty array then
-                                        match operator with
-                                        | FSharp.Data.Sql.In -> "1<>1" // nothing is in the empty set
-                                        | FSharp.Data.Sql.NotIn -> "1=1" // anything is not in the empty set
-                                        | _ -> failwith "Should not be called with any other operator"
-                                    else
-                                        let text = String.Join(",", array |> Array.map (fun p -> p.ParameterName))
-                                        Array.iter parameters.Add array
-                                        match operator with
-                                        | FSharp.Data.Sql.In -> sprintf "%s IN (%s)" column text
-                                        | FSharp.Data.Sql.NotIn -> sprintf "%s NOT IN (%s)" column text
-                                        | _ -> failwith "Should not be called with any other operator"
-
-                                let prefix = if i>0 then (sprintf " %s " op) else ""
-                                let paras = extractData data
-
-                                let operatorInQuery operator (array : IDbDataParameter[]) =
-                                    let innersql, innerpars = data.Value |> box :?> string * IDbDataParameter[]
-                                    Array.iter parameters.Add innerpars
-                                    match operator with
-                                    | FSharp.Data.Sql.NestedIn -> sprintf "%s IN (%s)" column innersql
-                                    | FSharp.Data.Sql.NestedNotIn -> sprintf "%s NOT IN (%s)" column innersql
-                                    | _ -> failwith "Should not be called with any other operator"
-
-                                ~~(sprintf "%s%s" prefix <|
-                                    match operator with
-                                    | FSharp.Data.Sql.IsNull -> sprintf "%s IS NULL" column
-                                    | FSharp.Data.Sql.NotNull -> sprintf "%s IS NOT NULL" column
-                                    | FSharp.Data.Sql.In 
-                                    | FSharp.Data.Sql.NotIn -> operatorIn operator paras
-                                    | FSharp.Data.Sql.NestedIn 
-                                    | FSharp.Data.Sql.NestedNotIn -> operatorInQuery operator paras
-                                    | _ ->
-                                        let aliasformat = sprintf "%s %s %s" column
-                                        match data with 
-                                        | Some d when (box d :? alias * SqlColumnType) ->
-                                            let alias2, col2 = box d :?> (alias * SqlColumnType)
-                                            let alias2f = Firebird.fieldNotation alias2 col2
-                                            aliasformat (operator.ToString()) alias2f
-                                        | _ ->
-                                            parameters.Add paras.[0]
-                                            aliasformat (operator.ToString()) paras.[0].ParameterName
-                        ))
-                        // there's probably a nicer way to do this
-                        let rec aux = function
-                            | x::[] when preds.Length > 0 ->
-                                ~~ (sprintf " %s " op)
-                                filterBuilder [x]
-                            | x::[] -> filterBuilder [x]
-                            | x::xs when preds.Length > 0 ->
-                                ~~ (sprintf " %s " op)
-                                filterBuilder [x]
-                                ~~ (sprintf " %s " op)
-                                aux xs
-                            | x::xs ->
-                                filterBuilder [x]
-                                ~~ (sprintf " %s " op)
-                                aux xs
-                            | [] -> ()
-
-                        Option.iter aux rest
-                        ~~ ")"
-
-                    match cond with
-                    | Or(preds,rest) -> build "OR" preds rest
-                    | And(preds,rest) ->  build "AND" preds rest
-                    | ConstantTrue -> ~~ " (1=1) "
-                    | ConstantFalse -> ~~ " (1=0) "
-
-                    filterBuilder conds
 
             // next up is the FROM statement which includes joins ..
             let fromBuilder() =
@@ -877,32 +950,35 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                             joinType (getTableNameForQuery destTable) destAlias)
                     ~~  (String.Join(" AND ", (List.zip data.ForeignKey data.PrimaryKey) |> List.map(fun (foreignKey,primaryKey) ->
                         sprintf "%s = %s" 
-                            (Firebird.fieldNotation (if data.RelDirection = RelationshipDirection.Parents then fromAlias else destAlias) foreignKey)
-                            (Firebird.fieldNotation (if data.RelDirection = RelationshipDirection.Parents then destAlias else fromAlias) primaryKey)
+                            (fieldNotation (if data.RelDirection = RelationshipDirection.Parents then fromAlias else destAlias) foreignKey)
+                            (fieldNotation (if data.RelDirection = RelationshipDirection.Parents then destAlias else fromAlias) primaryKey)
                             ))))
 
-            let groupByBuilder() =
-                sqlQuery.Grouping |> List.map(fst) |> List.concat
+            let groupByBuilder groupkeys =
+                groupkeys
                 |> List.iteri(fun i (alias,column) ->
                     if i > 0 then ~~ ", "
-                    ~~ (Firebird.fieldNotation alias column))
+                    ~~ (fieldNotation alias column))
 
             let orderByBuilder() =
                 sqlQuery.Ordering
                 |> List.iteri(fun i (alias,column,desc) ->
                     if i > 0 then ~~ ", "
-                    ~~ (sprintf "%s %s" (Firebird.fieldNotation alias column) (if not desc then "DESC " else "")))
+                    ~~ (sprintf "%s %s" (fieldNotation alias column) (if not desc then "DESC " else "")))
 
             let basetable = getTableNameForQuery baseTable
             if isDeleteScript then
                 ~~(sprintf "DELETE FROM %s " basetable)
             else 
                 // SELECT
-                if sqlQuery.Distinct then ~~(sprintf "SELECT DISTINCT %s " columns)
+                if sqlQuery.Distinct && sqlQuery.Count then ~~(sprintf "SELECT COUNT(DISTINCT %s) " (columns.Substring(0, columns.IndexOf(" as "))))
+                elif sqlQuery.Distinct then ~~(sprintf "SELECT DISTINCT %s " columns)
                 elif sqlQuery.Count then ~~("SELECT COUNT(1) ")
                 else  ~~(sprintf "SELECT %s " columns)
                 // FROM
-                ~~(sprintf " FROM %s as %s " basetable  baseAlias)
+                let bal = if baseAlias = "" then baseTable.Name else baseAlias
+                ~~(sprintf " FROM %s as %s " basetable  bal)
+                //~~(sprintf " FROM %s as %s " basetable  baseAlias)
                 sqlQuery.CrossJoins |> Seq.iter(fun (a,t) -> ~~(sprintf ",  %s as %s " (getTableNameForQuery t) a))
             fromBuilder()
             // WHERE
@@ -912,18 +988,21 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                 // only logical way to deal with them.
                 let f = [And([],Some sqlQuery.Filters)]
                 ~~" WHERE "
-                filterBuilder f
+                filterBuilder (~~) f
+
             // GROUP BY
             if sqlQuery.Grouping.Length > 0 then
-                ~~" GROUP BY "
-                groupByBuilder()
+                let groupkeys = sqlQuery.Grouping |> List.map(fst) |> List.concat
+                if groupkeys.Length > 0 then
+                    ~~" GROUP BY "
+                    groupByBuilder groupkeys
 
             if sqlQuery.HavingFilters.Length > 0 then
                 let keys = sqlQuery.Grouping |> List.map(fst) |> List.concat
 
-                let f = [And([],Some (sqlQuery.HavingFilters |> CommonTasks.parseHaving Firebird.fieldNotation keys))]
+                let f = [And([],Some (sqlQuery.HavingFilters |> CommonTasks.parseHaving fieldNotation keys))]
                 ~~" HAVING "
-                filterBuilder f
+                filterBuilder (~~) f
 
             // ORDER BY
             if sqlQuery.Ordering.Length > 0 then
@@ -931,10 +1010,18 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                 orderByBuilder()
 
             match sqlQuery.Union with
-            | Some(UnionType.UnionAll, suquery) -> ~~(sprintf " UNION ALL %s " suquery)
-            | Some(UnionType.NormalUnion, suquery) -> ~~(sprintf " UNION %s " suquery)
-            | Some(UnionType.Intersect, suquery) -> ~~(sprintf " INTERSECT %s " suquery)
-            | Some(UnionType.Except, suquery) -> ~~(sprintf " EXCEPT %s " suquery)
+            | Some(UnionType.UnionAll, suquery, pars) -> 
+                parameters.AddRange pars
+                ~~(sprintf " UNION ALL %s " suquery)
+            | Some(UnionType.NormalUnion, suquery, pars) -> 
+                parameters.AddRange pars
+                ~~(sprintf " UNION %s " suquery)
+            | Some(UnionType.Intersect, suquery, pars) -> 
+                parameters.AddRange pars
+                ~~(sprintf " INTERSECT %s " suquery)
+            | Some(UnionType.Except, suquery, pars) -> 
+                parameters.AddRange pars
+                ~~(sprintf " EXCEPT %s " suquery)
             | None -> ()
 
             match sqlQuery.Take, sqlQuery.Skip with
@@ -967,27 +1054,27 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                     match e._State with
                     | Created ->
                         let cmd = createInsertCommand con sb e
-                        Common.QueryEvents.PublishSqlQueryICol cmd.CommandText cmd.Parameters
+                        Common.QueryEvents.PublishSqlQueryICol con.ConnectionString cmd.CommandText cmd.Parameters
                         if timeout.IsSome then
                             cmd.CommandTimeout <- timeout.Value
                         let id = cmd.ExecuteScalar()
-                        CommonTasks.checkKey pkLookup id e
+                        CommonTasks.checkKey schemaCache.PrimaryKeys id e
                         e._State <- Unchanged
                     | Modified fields ->
                         let cmd = createUpdateCommand con sb e fields
-                        Common.QueryEvents.PublishSqlQueryICol cmd.CommandText cmd.Parameters
+                        Common.QueryEvents.PublishSqlQueryICol con.ConnectionString cmd.CommandText cmd.Parameters
                         if timeout.IsSome then
                             cmd.CommandTimeout <- timeout.Value
                         cmd.ExecuteNonQuery() |> ignore
                         e._State <- Unchanged
                     | Delete ->
                         let cmd = createDeleteCommand con sb e
-                        Common.QueryEvents.PublishSqlQueryICol cmd.CommandText cmd.Parameters
+                        Common.QueryEvents.PublishSqlQueryICol con.ConnectionString cmd.CommandText cmd.Parameters
                         if timeout.IsSome then
                             cmd.CommandTimeout <- timeout.Value
                         cmd.ExecuteNonQuery() |> ignore
                         // remove the pk to prevent this attempting to be used again
-                        e.SetPkColumnOptionSilent(pkLookup.[e.Table.Name], None)
+                        e.SetPkColumnOptionSilent(schemaCache.PrimaryKeys.[e.Table.Name], None)
                         e._State <- Deleted
                     | Deleted | Unchanged -> failwith "Unchanged entity encountered in update list - this should not be possible!")
 
@@ -1019,17 +1106,17 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                         | Created ->
                             async {
                                 let cmd = createInsertCommand con sb e :?> System.Data.Common.DbCommand
-                                Common.QueryEvents.PublishSqlQueryICol cmd.CommandText cmd.Parameters
+                                Common.QueryEvents.PublishSqlQueryICol con.ConnectionString cmd.CommandText cmd.Parameters
                                 if timeout.IsSome then
                                     cmd.CommandTimeout <- timeout.Value
                                 let! id = cmd.ExecuteScalarAsync() |> Async.AwaitTask
-                                CommonTasks.checkKey pkLookup id e
+                                CommonTasks.checkKey schemaCache.PrimaryKeys id e
                                 e._State <- Unchanged
                             }
                         | Modified fields ->
                             async {
                                 let cmd = createUpdateCommand con sb e fields :?> System.Data.Common.DbCommand
-                                Common.QueryEvents.PublishSqlQueryICol cmd.CommandText cmd.Parameters
+                                Common.QueryEvents.PublishSqlQueryICol con.ConnectionString cmd.CommandText cmd.Parameters
                                 if timeout.IsSome then
                                     cmd.CommandTimeout <- timeout.Value
                                 do! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
@@ -1038,12 +1125,12 @@ type internal FirebirdProvider(resolutionPath, owner, referencedAssemblies, quot
                         | Delete ->
                             async {
                                 let cmd = createDeleteCommand con sb e :?> System.Data.Common.DbCommand
-                                Common.QueryEvents.PublishSqlQueryICol cmd.CommandText cmd.Parameters
+                                Common.QueryEvents.PublishSqlQueryICol con.ConnectionString cmd.CommandText cmd.Parameters
                                 if timeout.IsSome then
                                     cmd.CommandTimeout <- timeout.Value
                                 do! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
                                 // remove the pk to prevent this attempting to be used again
-                                e.SetPkColumnOptionSilent(pkLookup.[e.Table.Name], None)
+                                e.SetPkColumnOptionSilent(schemaCache.PrimaryKeys.[e.Table.Name], None)
                                 e._State <- Deleted
                             }
                         | Deleted | Unchanged -> failwith "Unchanged entity encountered in update list - this should not be possible!"
