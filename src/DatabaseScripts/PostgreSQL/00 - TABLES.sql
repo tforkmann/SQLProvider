@@ -1,7 +1,3 @@
-SET foreign_key_checks = 0;
-DROP TABLE `hr`.`countries`, `hr`.`departments`, `hr`.`employees`, `hr`.`job_history`, `hr`.`jobs`, `hr`.`locations`, `hr`.`regions`;
-SET foreign_key_checks = 1;
-
 CREATE TABLE IF NOT EXISTS COUNTRIES
 (	
 	COUNTRY_ID CHAR(2) NOT NULL, 
@@ -151,4 +147,10 @@ CREATE TABLE IF NOT EXISTS postgresql_types
     xid_0 XID, -- [Npgsql >= 3]
     xml_0 XML,
     PRIMARY KEY (postgresql_types_id)
+);
+
+CREATE SCHEMA IF NOT EXISTS other_schema;
+
+CREATE TABLE IF NOT EXISTS other_schema.table_in_other_schema (
+    column_in_other_schema int primary key
 );

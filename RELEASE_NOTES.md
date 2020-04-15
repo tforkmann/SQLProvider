@@ -1,3 +1,202 @@
+### 1.1.84 - 26.02.2020
+* Non-async query aggregates: Seq.sumQuery, Seq.maxQuery, ...
+* Supported Group-by key-column count increased
+
+### 1.1.83 - 11.02.2020
+* MS Access in .NET Core dll deployment
+
+### 1.1.82 - 10.02.2020
+* Fix for MS Access in .NET Core
+
+### 1.1.81 - 05.02.2020
+* Fix for regression of fixing the async stored procedure exception handling, #667
+
+### 1.1.79 - 04.02.2020
+* Fix for async stored procedure exception handling, #667
+* MS Access provider included in .NET Core
+* .NET Core package references updated, e.g. System.Data.SqlClient
+
+### 1.1.76 - 10.12.2019
+* TypeProvider SDK-update: Perf by caching improvements
+
+### 1.1.75 - 18.11.2019
+* More alias query generation fixes
+
+### 1.1.74 - 12.11.2019
+* Fix for #652, alias generation
+
+### 1.1.73 - 11.11.2019
+* Better filter support to group-by join over 2 or 3 tables
+
+### 1.1.72 - 01.11.2019
+* Possibility to join 2 or 3 tables to group-by PR #650
+* Better let and into -keyword handling PR #648
+
+### 1.1.71 - 01.11.2019
+* Fixed where-before-join -query
+* Param naming fix, part 2
+
+### 1.1.68 - 10.09.2019
+* Query-translation fixes #634
+* Initial exist-sub-query support, PR #603
+
+### 1.1.67 - 29.08.2019
+* Param naming fix, PR #632
+
+### 1.1.66 - 31.07.2019
+* Math.pow operator
+* Typo fix, PR #627
+
+### 1.1.65 - 06.06.2019
+* Left join parameter aliases underscore fix
+
+### 1.1.64 - 04.06.2019
+* Views for SQLite, PR #618
+
+### 1.1.63 - 14.05.2019
+* Fix for multiple outer joins #614
+
+### 1.1.62 - 23.04.2019
+* .NET Core editor fix, PR #611
+
+### 1.1.61 - 09.04.2019
+* Reverted .NET Standard library to fix stackoverflow issue
+
+### 1.1.60 - 20.03.2019
+* Experimental ProvidedTypes.fs to fix .NET Standard stackoverflow issue
+
+### 1.1.59 - 02.03.2019
+* Provided types update
+* .NET Standard ODBC support
+
+### 1.1.58 - 19.01.2019
+* SQL Server scalar function return parameter fix, #598
+
+### 1.1.57 - 04.01.2019
+* More asynchronous queries, fix #519
+
+### 1.1.56 - 02.01.2019
+* SQLite support for views #591
+
+### 1.1.55 - 13.12.2018
+* Left join with op_bangbang to non-fk columns #588
+
+### 1.1.54 - 13.12.2018
+* FIPS compliance #586
+
+### 1.1.53 - 30.11.2018
+* Fix old SQL server paging, #581
+* Multiple similar sub-queries: parameter name generation fix
+* Alias resolving fixed on async aggregate operations in multi-table queries
+
+### 1.1.52 - 13.09.2018
+* No limitation of 7 joins, fixes #190
+
+### 1.1.51 - 10.09.2018
+* Corrected use of concurrent dictionary in MS-SQL ServerVersion
+
+### 1.1.50 - 05.09.2018
+* TypeProvider SDK update
+* Context schema path fix PR #560
+
+### 1.1.49 - 15.08.2018
+* MsSql: Add brackets around the OUTPUT column name of the INSERT command PR #567
+* ContextSchemaCache to support stored procedures #PR 566
+
+### 1.1.48 - 27.07.2018
+* Ordering fixed on async sproc resultset
+
+### 1.1.47 - 26.07.2018
+* Firebird provider fix PR #562
+* Fix for SQL Server sproc output parameters PR #564
+* More asynchronous sprocs execution
+* CloneTo to attach entities to contexts, #561
+
+### 1.1.45 - 05.07.2018
+*  Paging support for SQL Server 2008, PR #558
+*  Upsert, PR #557
+
+### 1.1.44 - 25.06.2018
+* Extend SQLEntity.MapTo to allow mapping when field names are different than column names, PR #556
+
+### 1.1.43 - 12.06.2018
+* Comparison being flipped around when a constant comes first #553
+
+### 1.1.42 - 03.05.2018
+* Context schema cache support PR #545
+* Improved option type support in convertTypes. PR #544
+* Fixed broken overload of Create-method #545
+
+### 1.1.41 - 16.04.2018
+* Oracle: Added support for TIMESTAMP with precision specification. 
+* Generate Create method params: nullable / default values / identity columns
+* Fixed incorrect table alias on canonical join issue #533
+* Reverted some component updateds to address build issue and .Net standard issue
+
+### 1.1.40 - 10.04.2018
+* Fix to allow async procedure calls without return values #535
+
+### 1.1.39 - 28.03.2018
+* Allow specifying multiple schemas for PostgreSQL / MySql, PR #530
+
+### 1.1.38 - 14.03.2018
+* Group-by key canonical operation support
+* Crossjoin support for recent LINQ-trees
+* Reference component updates
+
+### 1.1.37 - 01.03.2018
+* Add ConnectionStringHash property to SqlEventData PR #524
+
+### 1.1.36 - 24.02.2018
+* distinct count support
+
+### 1.1.35 - 15.02.2018
+* selectOperations parameter to enable running canonical operations on select clause, PR #518
+
+### 1.1.34 - 15.02.2018
+* Access Date cast fix
+* ToString() as canonical operation
+* Case-clause alias resolution fix
+
+### 1.1.33 - 14.02.2018
+* Canonical operations chaining type-checking fixed
+
+### 1.1.32 - 13.02.2018
+* initial case-when-else support on where-clauses, PR #515
+* mapping SQL server time to TimeSpan, PR #517
+* fixed canonical operations when constant is before column
+
+### 1.1.31 - 01.02.2018
+* Oracle fix insert rows into table without primary key #514
+
+### 1.1.30 - 01.02.2018
+* Postgres ltree mapping PR #510
+* Single table group-by over a constant value PR #511
+* More aggregate functions: StdDev, Variance
+* More canonical math functions: Sqrt, Sin, Cos, Tan, ASin, ACos, ATan, Math.Max and Math.Min
+
+### 1.1.29 - 25.01.2018
+* Firebird fixes for numeric columns and column descriptions, PR #508
+
+### 1.1.28 - 19.01.2018
+* More dynamic naming for nested parameters
+
+### 1.1.27 - 19.01.2018
+* Support for parameters in union queries #505
+* Support for string notlike-operations with LINQ syntax: not(x.StartsWith("..."))
+
+### 1.1.26 - 12.01.2018
+* Updated the Type Provider SDK
+
+### 1.1.25 - 10.01.2018
+* Fix base alias in Firebird Provider PR #503
+
+### 1.1.24 - 10.01.2018
+* Fix for Postgres "Invalid procedure" #482
+* Fix for Postgres arrays on Mono
+* Fix for LINQ where(not(xs.Contains(subquery)))
+* Support for box-operator in null-checks to make easier checking of inner-join nulls.
+
 ### 1.1.23 - 20.11.2017
 * Option type fix for Like-search
 

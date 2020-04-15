@@ -15,6 +15,8 @@ open System.IO
 #load @"packages/SourceLink.Fake/tools/SourceLink.fsx"
 #endif
 
+#r @"packages/scripts/Npgsql/lib/net451/Npgsql.dll"
+
 // --------------------------------------------------------------------------------------
 // START TODO: Provide project-specific details below
 // --------------------------------------------------------------------------------------
@@ -39,7 +41,7 @@ let summary = "Type providers for SQL database access."
 let description = "Type providers for SQL database access."
 
 // List of author names (for NuGet package)
-let authors = [ "Ross McKinlay, Colin Bull" ]
+let authors = [ "Ross McKinlay, Colin Bull, Tuomas Hietanen" ]
 
 // Tags for your project (for NuGet package)
 let tags = "F#, fsharp, typeprovider, sql, sqlserver"
@@ -96,7 +98,7 @@ Target "Build" (fun _ ->
 
     // Build .NET Framework solution
     !!"SQLProvider.sln" ++ "SQLProvider.Tests.sln"
-    |> MSBuildRelease "" "Rebuild"
+    |> MSBuildReleaseExt "" [ "DefineConstants", buildServer.ToString().ToUpper()] "Rebuild"
     |> ignore
 )
 
@@ -115,6 +117,108 @@ Target "BuildCore" (fun _ ->
 )
 
 // --------------------------------------------------------------------------------------
+// Set up a PostgreSQL database in the CI pipeline to run tests
+
+Target "SetupPostgreSQL" (fun _ ->
+      let connBuilder = Npgsql.NpgsqlConnectionStringBuilder()
+
+      connBuilder.Host <- "localhost"
+      connBuilder.Port <- 5432
+      connBuilder.Database <- "postgres"
+      connBuilder.Username <- "postgres"
+      connBuilder.Password <- 
+        match buildServer with
+        | Travis -> ""
+        | AppVeyor -> "Password12!"
+        | _ -> "postgres"      
+  
+      let runCmd query = 
+        // We wait up to 30 seconds for PostgreSQL to be initialized
+        let rec runCmd' attempt = 
+          try
+            use conn = new Npgsql.NpgsqlConnection(connBuilder.ConnectionString)
+            conn.Open()
+            use cmd = new Npgsql.NpgsqlCommand(query, conn)
+            cmd.ExecuteNonQuery() |> ignore 
+          with e -> 
+            printfn "Connection attempt %i: %A" attempt e
+            Threading.Thread.Sleep 1000
+            if attempt < 30 then runCmd' (attempt + 1)
+
+        runCmd' 0
+              
+      let testDbName = "sqlprovider"
+      printfn "Creating test database %s on connection %s" testDbName connBuilder.ConnectionString
+      runCmd (sprintf "CREATE DATABASE %s" testDbName)
+      connBuilder.Database <- testDbName
+
+      (!! "src/DatabaseScripts/PostgreSQL/*.sql")
+      |> Seq.map (fun file -> printfn "Running script %s on connection %s" file connBuilder.ConnectionString; file)
+      |> Seq.map IO.File.ReadAllText      
+      |> Seq.iter runCmd
+)
+
+// --------------------------------------------------------------------------------------
+// Set up a MS SQL Server database to run tests
+
+let setupMssql url saPassword = 
+    let connBuilder = Data.SqlClient.SqlConnectionStringBuilder()    
+    connBuilder.InitialCatalog <- "master"
+    connBuilder.UserID <- "sa"
+    connBuilder.DataSource <- url
+    connBuilder.Password <- saPassword   
+          
+    let runCmd query = 
+      // We wait up to 30 seconds for MSSQL to be initialized
+      let rec runCmd' attempt = 
+        try
+          use conn = new Data.SqlClient.SqlConnection(connBuilder.ConnectionString)
+          conn.Open()
+          use cmd = new Data.SqlClient.SqlCommand(query, conn)
+          cmd.ExecuteNonQuery() |> ignore 
+        with e -> 
+          printfn "Connection attempt %i: %A" attempt e
+          Threading.Thread.Sleep 1000
+          if attempt < 30 then runCmd' (attempt + 1)
+
+      runCmd' 0
+
+    let runScript fileLines =            
+            
+      // We look for the 'GO' lines that complete the individual SQL commands
+      let rec cmdGen cache (lines : string list) =
+        seq {
+          match cache, lines with
+          | [], [] -> ()
+          | cmds, [] -> yield cmds
+          | cmds, l :: ls when l.Trim().ToUpper() = "GO" -> yield cmds; yield! cmdGen [] ls
+          | cmds, l :: ls -> yield! cmdGen (l :: cmds) ls
+        }      
+
+      for cmd in cmdGen [] (fileLines |> Seq.toList) do
+        let query = cmd |> List.rev |> String.concat "\r\n"
+        runCmd query
+
+    let testDbName = "sqlprovider"
+    printfn "Creating test database %s on connection %s" testDbName connBuilder.ConnectionString
+    runCmd (sprintf "CREATE DATABASE %s" testDbName)
+    connBuilder.InitialCatalog <- testDbName
+
+    (!! "src/DatabaseScripts/MSSQLServer/*.sql")
+    |> Seq.map (fun file -> printfn "Running script %s on connection %s" file connBuilder.ConnectionString; file)
+    |> Seq.map IO.File.ReadAllLines
+    |> Seq.iter runScript
+    
+Target "SetupMSSQL2008R2" (fun _ ->
+    setupMssql "(local)\SQL2008R2SP2" "Password12!"
+)
+
+Target "SetupMSSQL2017" (fun _ ->
+    setupMssql "(local)\SQL2017" "Password12!"
+)
+
+
+// --------------------------------------------------------------------------------------
 // Run the unit tests using test runner
 
 Target "RunTests" (fun _ ->
@@ -129,20 +233,41 @@ Target "RunTests" (fun _ ->
 // --------------------------------------------------------------------------------------
 // Build a NuGet package
 
-Target "NuGet" (fun _ ->
-    // Before release, set your API-key as instructed in the bottom of page https://www.nuget.org/account
+Target "CopyFiles" (fun _ ->
 
 #if MONO
 #else
-    let dotnetSdk = @"C:\Program Files\dotnet\sdk\2.0.0\Microsoft\Microsoft.NET.Build.Extensions\net461\lib\"
-    if directoryExists dotnetSdk then
+    let copyDotnetLibraries dotnetSdk =
        CopyFile "bin/netstandard2.0" (dotnetSdk + @"netstandard.dll")
        CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.Console.dll")
        CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.IO.dll")
        CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.Reflection.dll")
        CopyFile "bin/netstandard2.0" (dotnetSdk + @"System.Runtime.dll")
+       CopyFile "bin/netstandard2.0" ("packages/standard/System.Data.OleDb/ref/net461/System.Data.OleDb.dll")
+    // See https://github.com/fsprojects/FSharp.TypeProviders.SDK/issues/292
+    // let netDir version = 
+    //     @"C:\Program Files\dotnet\sdk\" + version + @"\Microsoft\Microsoft.NET.Build.Extensions\net461\lib\"
+    // let dotnetSdk211 = netDir "2.1.100"
+    // let dotnetSdk212 = netDir "2.1.202"
+    // if directoryExists dotnetSdk211 then 
+    //     copyDotnetLibraries dotnetSdk211
+    // elif directoryExists dotnetSdk212 then 
+    //     copyDotnetLibraries dotnetSdk212
+    copyDotnetLibraries "packages/standard/NETStandard.Library/build/netstandard2.0/ref/"
+
     CopyFile "bin/netstandard2.0" "packages/System.Data.SqlClient/lib/net461/System.Data.SqlClient.dll" 
+
 #endif
+
+    CreateDir "bin/typeproviders/fsharp41"
+    CopyDir "bin/typeproviders/fsharp41/net472" "bin/net472" allFiles
+    CopyDir "bin/typeproviders/fsharp41/netcoreapp2.0" "bin/netcoreapp2.0" allFiles
+    DeleteDir "bin/net472"
+    DeleteDir "bin/netcoreapp2.0"
+)
+
+Target "NuGet" (fun _ ->
+    // Before release, set your API-key as instructed in the bottom of page https://www.nuget.org/account
 
     CopyDir @"temp/lib" "bin" allFiles
 
@@ -285,16 +410,26 @@ Target "All" DoNothing
 Target "BuildDocs" DoNothing
 
 "Clean"
-  ==> "AssemblyInfo"
+  ==> "AssemblyInfo"  
+  // In CI mode, we setup a Postgres database before building
+  =?> ("SetupPostgreSQL", not isLocalBuild)
+  // On AppVeyor, we also add a SQL Server 2008R2 one and a SQL Server 2017 for compatibility
+  =?> ("SetupMSSQL2008R2", buildServer = AppVeyor)
+  =?> ("SetupMSSQL2017", buildServer = AppVeyor)
   ==> "Build"
   =?> ("BuildCore", isLocalBuild || not isMono)
   ==> "RunTests"
   ==> "CleanDocs"
   // Travis doesn't support mono+dotnet:
-  =?> ("GenerateReferenceDocs",isLocalBuild && not isMono)
-  =?> ("GenerateHelp",isLocalBuild && not isMono)
+  =?> ("GenerateReferenceDocs", isLocalBuild && not isMono)
+  =?> ("GenerateHelp", isLocalBuild && not isMono)
   ==> "All"
 
+"Build"
+  =?> ("BuildCore", isLocalBuild || not isMono)
+  ==> "CopyFiles"
+  ==> "NuGet"
+  
 "All"
   ==> "BuildDocs"
 

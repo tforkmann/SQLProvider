@@ -1,7 +1,17 @@
-﻿namespace FSharp.Data.Sql.Common
+namespace FSharp.Data.Sql.Common
     
 open System
 open System.Collections.Generic
+
+#if NETSTANDARD
+module StandardExtensions =
+    type System.Data.DataTable with
+        member x.AsEnumerable() = 
+            seq {
+                for r in x.Rows do
+                yield r
+            }
+#endif
 
 module internal Utilities = 
     
@@ -29,9 +39,12 @@ module internal Utilities =
         // eg "Item1" -> tupleIndex.[0]
         let itemid = 
             if name.Length > 4 then
-                (int <| name.Remove(0, 4))
+                match Int32.TryParse (name.Remove(0, 4)) with
+                | (true, n) when name.StartsWith("Item", StringComparison.InvariantCultureIgnoreCase) -> n
+                | _ -> Int32.MaxValue
             else Int32.MaxValue
-        if(tupleIndex.Count < itemid) then ""
+        if itemid = Int32.MaxValue && tupleIndex.Contains(name) && name <> "" then name //already resolved
+        elif tupleIndex.Count < itemid then name
         else tupleIndex.[itemid - 1]
 
 
@@ -68,35 +81,66 @@ module internal Utilities =
         parseAggregates' fieldNotat fieldNotationAlias query []
 
     let rec convertTypes (itm:obj) (returnType:Type) =
-        if returnType.Name.StartsWith("Option") && returnType.GenericTypeArguments.Length = 1 then
+        if (returnType.Name.StartsWith("Option") || returnType.Name.StartsWith("FSharpOption")) && returnType.GenericTypeArguments.Length = 1 then
             if itm = null then None |> box
-            else Option.Some(convertTypes itm (returnType.GenericTypeArguments.[0]) |> unbox) |> box
+            else
+            match convertTypes itm (returnType.GenericTypeArguments.[0]) with
+            | :? String as t -> Option.Some t |> box
+            | :? Int32 as t -> Option.Some t |> box
+            | :? Decimal as t -> Option.Some t |> box
+            | :? Int64 as t -> Option.Some t |> box
+            | :? Single as t -> Option.Some t |> box
+            | :? UInt32 as t -> Option.Some t |> box
+            | :? Double as t -> Option.Some t |> box
+            | :? UInt64 as t -> Option.Some t |> box
+            | :? Int16 as t -> Option.Some t |> box
+            | :? UInt16 as t -> Option.Some t |> box
+            | :? DateTime as t -> Option.Some t |> box
+            | :? Boolean as t -> Option.Some t |> box
+            | :? Byte as t -> Option.Some t |> box
+            | :? SByte as t -> Option.Some t |> box
+            | :? Char as t -> Option.Some t |> box
+            | :? DateTimeOffset as t -> Option.Some t |> box
+            | :? TimeSpan as t -> Option.Some t |> box
+            | t -> Option.Some t |> box
         elif returnType.Name.StartsWith("Nullable") && returnType.GenericTypeArguments.Length = 1 then
             if itm = null then null |> box
             else convertTypes itm (returnType.GenericTypeArguments.[0])
         else
         match itm, returnType with
+        | :? string as s, t when t = typeof<String> -> s |> box
         | :? string as s, t when t = typeof<Int32> && Int32.TryParse s |> fst -> Int32.Parse s |> box
         | :? string as s, t when t = typeof<Decimal> && Decimal.TryParse s |> fst -> Decimal.Parse s |> box
-        | :? string as s, t when t = typeof<DateTime> && DateTime.TryParse s |> fst -> DateTime.Parse s |> box
         | :? string as s, t when t = typeof<Int64> && Int64.TryParse s |> fst -> Int64.Parse s |> box
+        | :? string as s, t when t = typeof<Single> && Single.TryParse s |> fst -> Single.Parse s |> box
         | :? string as s, t when t = typeof<UInt32> && UInt32.TryParse s |> fst -> UInt32.Parse s |> box
+        | :? string as s, t when t = typeof<Double> && Double.TryParse s |> fst -> Double.Parse s |> box
         | :? string as s, t when t = typeof<UInt64> && UInt64.TryParse s |> fst -> UInt64.Parse s |> box
-        | :? string as s, t when t = typeof<float32> && Single.TryParse s |> fst -> Single.Parse s |> box
         | :? string as s, t when t = typeof<Int16> && Int16.TryParse s |> fst -> Int16.Parse s |> box
+        | :? string as s, t when t = typeof<UInt16> && UInt16.TryParse s |> fst -> UInt16.Parse s |> box
+        | :? string as s, t when t = typeof<DateTime> && DateTime.TryParse s |> fst -> DateTime.Parse s |> box
         | :? string as s, t when t = typeof<Boolean> && Boolean.TryParse s |> fst -> Boolean.Parse s |> box
+        | :? string as s, t when t = typeof<Byte> && Byte.TryParse s |> fst -> Byte.Parse s |> box
+        | :? string as s, t when t = typeof<SByte> && SByte.TryParse s |> fst -> SByte.Parse s |> box
+        | :? string as s, t when t = typeof<Char> && Char.TryParse s |> fst -> Char.Parse s |> box
+        | :? string as s, t when t = typeof<DateTimeOffset> && DateTimeOffset.TryParse s |> fst -> DateTimeOffset.Parse s |> box
+        | :? string as s, t when t = typeof<TimeSpan> && TimeSpan.TryParse s |> fst -> TimeSpan.Parse s |> box
         | _ -> 
-            if returnType = typeof<Int32> then Convert.ToInt32 itm |> box
-            elif returnType = typeof<decimal> then Convert.ToDecimal itm |> box
+            if returnType = typeof<String> then Convert.ToString itm |> box
+            elif returnType = typeof<Int32> then Convert.ToInt32 itm |> box
+            elif returnType = typeof<Decimal> then Convert.ToDecimal itm |> box
             elif returnType = typeof<Int64> then Convert.ToInt64 itm |> box
-            elif returnType = typeof<float32> then Convert.ToSingle itm |> box
+            elif returnType = typeof<Single> then Convert.ToSingle itm |> box
             elif returnType = typeof<UInt32> then Convert.ToUInt32 itm |> box
-            elif returnType = typeof<double> then Convert.ToDouble itm |> box
+            elif returnType = typeof<Double> then Convert.ToDouble itm |> box
             elif returnType = typeof<UInt64> then Convert.ToUInt64 itm |> box
             elif returnType = typeof<Int16> then Convert.ToInt16 itm |> box
             elif returnType = typeof<UInt16> then Convert.ToUInt16 itm |> box
             elif returnType = typeof<DateTime> then Convert.ToDateTime itm |> box
             elif returnType = typeof<Boolean> then Convert.ToBoolean itm |> box
+            elif returnType = typeof<Byte> then Convert.ToByte itm |> box
+            elif returnType = typeof<SByte> then Convert.ToSByte itm |> box
+            elif returnType = typeof<Char> then Convert.ToChar itm |> box
             else itm |> box
 
     /// Standard SQL. Provider spesific overloads can be done before this.
@@ -107,18 +151,29 @@ module internal Utilities =
             match op with // These are very standard:
             | ToUpper -> sprintf "UPPER(%s)" column
             | ToLower -> sprintf "LOWER(%s)" column
-            | Replace(SqlStr(searchItm),SqlStr(toItm)) -> sprintf "REPLACE(%s,'%s','%s')" column searchItm toItm
             | Abs -> sprintf "ABS(%s)" column
             | Ceil -> sprintf "CEILING(%s)" column
             | Floor -> sprintf "FLOOR(%s)" column
             | Round -> sprintf "ROUND(%s)" column
             | RoundDecimals x -> sprintf "ROUND(%s,%d)" column x
+            | BasicMath(o, c) when o = "/" -> sprintf "(%s %s (1.0*%O))" column o c
+            | BasicMathLeft(o, c) when o = "/" -> sprintf "(%O %s (1.0*%s))" c o column
             | BasicMath(o, c) -> sprintf "(%s %s %O)" column o c
+            | BasicMathLeft(o, c) -> sprintf "(%O %s %s)" c o column
+            | Sqrt -> sprintf "SQRT(%s)" column
+            | Sin -> sprintf "SIN(%s)" column
+            | Cos -> sprintf "COS(%s)" column
+            | Tan -> sprintf "TAN(%s)" column
+            | ASin -> sprintf "ASIN(%s)" column
+            | ACos -> sprintf "ACOS(%s)" column
+            | ATan -> sprintf "ATAN(%s)" column
             | _ -> failwithf "Not yet supported: %O %s" op (key.ToString())
         | GroupColumn (AvgOp key, KeyColumn _) -> sprintf "AVG(%s)" (colSprint key)
         | GroupColumn (MinOp key, KeyColumn _) -> sprintf "MIN(%s)" (colSprint key)
         | GroupColumn (MaxOp key, KeyColumn _) -> sprintf "MAX(%s)" (colSprint key)
         | GroupColumn (SumOp key, KeyColumn _) -> sprintf "SUM(%s)" (colSprint key)
+        | GroupColumn (StdDevOp key, KeyColumn _) -> sprintf "STDDEV(%s)" (colSprint key)
+        | GroupColumn (VarianceOp key, KeyColumn _) -> sprintf "VAR(%s)" (colSprint key)
         | GroupColumn (KeyOp key,_) -> colSprint key
         | GroupColumn (CountOp _,_) -> sprintf "COUNT(1)"
         // Nested aggregate operators, e.g. select(x*y) |> Seq.sum
@@ -126,6 +181,8 @@ module internal Utilities =
         | GroupColumn (MinOp _,x) -> sprintf "MIN(%s)" (recursionBase x)
         | GroupColumn (MaxOp _,x) -> sprintf "MAX(%s)" (recursionBase x)
         | GroupColumn (SumOp _,x) -> sprintf "SUM(%s)" (recursionBase x)
+        | GroupColumn (StdDevOp _,x) -> sprintf "STDDEV(%s)" (recursionBase x)
+        | GroupColumn (VarianceOp _,x) -> sprintf "VARIANCE(%s)" (recursionBase x)
 
     let rec genericAliasNotation aliasSprint = function
         | SqlColumnType.KeyColumn col -> aliasSprint col
@@ -138,7 +195,22 @@ module internal Utilities =
         | GroupColumn (MinOp key,_) -> aliasSprint (sprintf "MIN_%s" key)
         | GroupColumn (MaxOp key,_) -> aliasSprint (sprintf "MAX_%s" key)
         | GroupColumn (SumOp key,_) -> aliasSprint (sprintf "SUM_%s" key)
+        | GroupColumn (StdDevOp key,_) -> aliasSprint (sprintf "STDDEV_%s" key)
+        | GroupColumn (VarianceOp key,_) -> aliasSprint (sprintf "VAR_%s" key)
 
+    let rec getBaseColumnName x =
+        match x with
+        | KeyColumn k -> k
+        | CanonicalOperation(_, c) -> "c" + getBaseColumnName c
+        | GroupColumn(_, c) -> "g" + getBaseColumnName c
+
+    let fieldConstant (value:obj) =
+        //Can we create named parameters in ODBC, and how?
+        match value with
+        | :? Guid
+        | :? DateTime
+        | :? String -> sprintf "'%s'" (value.ToString().Replace("'", ""))
+        | _ -> value.ToString()
 
 module ConfigHelpers = 
     
@@ -450,7 +522,7 @@ module Sql =
             }
         async {
             let! items = readitems []
-            return items |> List.toArray
+            return items |> List.toArray |> Array.rev
         }
 
     let dbUnbox<'a> (v:obj) : 'a = 
@@ -472,9 +544,9 @@ module Sql =
             con.Close(); result
         }
 
-    let executeSql createCommand sql (con:IDbConnection) =        
-        use com : IDbCommand = createCommand sql con   
-        com.ExecuteReader()    
+    let executeSql createCommand sql (con:IDbConnection) = 
+        use com : IDbCommand = createCommand sql con 
+        com.ExecuteReader() 
 
     let executeSqlAsync createCommand sql (con:IDbConnection) =
         use com : System.Data.Common.DbCommand = createCommand sql con   
@@ -497,3 +569,33 @@ module Sql =
     let ensureOpen (con:IDbConnection) =
         if con.State <> ConnectionState.Open
         then con.Open()
+
+    /// Helper function to run async computation non-parallel style for list of objects.
+    /// This is needed if async database opreation is executed for a list of entities.
+    let evaluateOneByOne asyncFunc entityList =
+        let rec executeOneByOne' asyncFunc entityList acc =
+            match entityList with
+            | [] -> async { return acc }
+            | h::t -> 
+                async {
+                    let! res = asyncFunc h
+                    return! executeOneByOne' asyncFunc t (res::acc)
+                }
+        executeOneByOne' asyncFunc entityList []
+
+// Taken from https://github.com/haf/yolo
+module Bytes =
+
+  open System.IO
+  open System.Security.Cryptography
+
+  let hash (algo : unit -> #HashAlgorithm) (bs : byte[]) =
+    use ms = new MemoryStream()
+    ms.Write(bs, 0, bs.Length)
+    ms.Seek(0L, SeekOrigin.Begin) |> ignore
+    use sha = algo ()
+    sha.ComputeHash ms
+
+  let sha1 = hash (fun () -> new SHA1CryptoServiceProvider())
+
+  let sha256 = hash (fun () -> new SHA256CryptoServiceProvider())

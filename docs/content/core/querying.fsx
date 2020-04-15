@@ -1,4 +1,4 @@
-﻿(*** hide ***)
+(*** hide ***)
 #I "../../../bin/net451"
 (*** hide ***)
 [<Literal>]
@@ -97,6 +97,56 @@ let itemAsync =
 
 If you consider using asynchronous queries, read more from the [async documentation](async.html).
 
+## SELECT -clause operations
+
+You can control the execution context of the select-operations by `GetDataContext` parameter `selectOperations`.
+The LINQ-query stays the same. You have two options: DotNetSide or DatabaseSide.
+
+This might have a significant effect on the size of data transferred from the database.
+
+### SelectOperations.DotNetSide (Default)
+
+Fetch the columns and run operations in .NET-side.
+
+```fsharp
+    let dc = sql.GetDataContext(SelectOperations.DotNetSide) // (same as without the parameter)
+    query {
+        for cust in dc.Main.Customers do
+        select (if cust.Country = "UK" then (cust.City)
+            else ("Outside UK"))
+    } |> Seq.toArray
+```
+
+```sql
+SELECT 
+   [cust].[Country] as 'Country',
+   [cust].[City] as 'City' 
+FROM main.Customers as [cust]
+```
+
+### SelectOperations.DatabaseSide
+
+Execute the operations as part of SQL. 
+```
+let dc = sql.GetDataContext(SelectOperations.DatabaseSide)
+let qry = 
+    query {
+        for cust in dc.Main.Customers do
+        select (if cust.Country = "UK" then (cust.City)
+            else ("Outside UK"))
+    } |> Seq.toArray
+```
+
+```sql
+SELECT 
+   CASE WHEN ([cust].[Country] = @param1) THEN 
+   [cust].[City] 
+   ELSE @param2 
+END as [result] 
+FROM main.Customers as [cust]
+-- params @param1 - "UK"; @param2 - "Outside UK"
+```
+
 
 ## Supported Query Expression Keywords
 
@@ -106,8 +156,8 @@ If you consider using asynchronous queries, read more from the [async documentat
 .Concat()                |X | `open System.Linq`, SQL UNION ALL-clause                     | 
 .Union()                 |X | `open System.Linq`, SQL UNION-clause                         | 
 all	                     |X |                                                       | 
-averageBy                |X | Single table                                          | 
-averageByNullable        |X | Single table                                          | 
+averageBy                |X | Single table (1)                                       | 
+averageByNullable        |X | Single table (1)                                      | 
 contains                 |X |                                                       | 
 count                    |X |                                                       | 
 distinct                 |X |                                                       | 
@@ -115,7 +165,7 @@ exactlyOne               |X |                                                   
 exactlyOneOrDefault      |X |                                                       | 
 exists                   |X |                                                       | 
 find                     |X |                                                       | 
-groupBy                  |x | Initially only very simple groupBy (and having) is supported: On single-table with direct aggregates like `.Count()` or direct parameter calls like `.Sum(fun entity -> entity.UnitPrice)`. | 
+groupBy                  |x | Simple support (2) | 
 groupJoin                |  |                                                       | 
 groupValBy	             |  |                                                       | 
 head                     |X |                                                       | 
@@ -126,10 +176,10 @@ last                     |  |                                                   
 lastOrDefault            |  |                                                       | 
 leftOuterJoin            |  |                                                       | 
 let                      |x | ...but not using tmp variables in where-clauses       |
-maxBy                    |X | Single table                                          | 
-maxByNullable            |X | Single table                                          | 
-minBy                    |X | Single table                                          | 
-minByNullable            |X | Single table                                          | 
+maxBy                    |X | Single table (1)                                      | 
+maxByNullable            |X | Single table (1)                                      | 
+minBy                    |X | Single table (1)                                      | 
+minByNullable            |X | Single table (1)                                      | 
 nth                      |X |                                                       | 
 select                   |X |                                                       | 
 skip                     |X |                                                       | 
@@ -138,16 +188,20 @@ sortBy                   |X |                                                   
 sortByDescending	     |X |                                                       | 
 sortByNullable           |X |                                                       | 
 sortByNullableDescending |X |                                                       | 
-sumBy                    |X | Single table                                          | 
-sumByNullable            |X | Single table                                          | 
+sumBy                    |X | Single table (1)                                      | 
+sumByNullable            |X | Single table (1)                                      | 
 take                     |X |                                                       | 
 takeWhile                |  |                                                       | 
 thenBy	                 |X |                                                       |     
 thenByDescending	     |X |                                                       |   
 thenByNullable           |X |                                                       | 
 thenByNullableDescending |X |                                                       |
-where                    |x | Server side variables must be plain without .NET operations or use the supported canonical functions. | 
+where                    |x | Server side variables must either be plain without .NET operations or use the supported canonical functions. | 
 
+Currently SQL-provider doesn't generate nested queries in from-clauses, the query is flattened to a single select. Nested in-clauses in where-clauses are supported.
+(1) Single table, if you want multiple tables, use corresponding Seq query or async aggregates, like Seq.sumQuery or Seq.sumAsync.
+(2) Very simple groupBy (and having) is supported: Single table, or max 3 table joins before groupBy, with direct aggregates like `.Count()` or direct parameter calls like `.Sum(fun entity -> entity.UnitPrice)`, and max 7 key columns. No nested grouping.
+ 
 ### Canonical Functions 
 
 Besides that, we support these .NET-functions to transfer the logics to SQL-clauses (starting from SQLProvider version 1.0.57).
@@ -178,21 +232,23 @@ Operations do support parameters to be either constants or other SQL-columns (e.
  
 #### .NET DateTime Functions
 
-| .NET         | MsSqlServer    | PostgreSql| MySql    | Oracle    | SQLite  | MSAccess  | Odbc      |  Notes
-|--------------|----------------|-----------|----------|-----------|---------|-----------|-----------|--------------------------|
-.Date          | CAST(AS DATE)  | DATE_TRUNC| DATE     | TRUNC     | STRFTIME| DateValue(Format)| CONVERT(SQL_DATE)  |   |
-.Year          | YEAR           | DATE_PART | YEAR     | EXTRACT   | STRFTIME| Year      | YEAR       |   |
-.Month         | MONTH          | DATE_PART | MONTH    | EXTRACT   | STRFTIME| Month     | MONTH      |   |
-.Day           | DAY            | DATE_PART | DAY      | EXTRACT   | STRFTIME| Day       | DAYOFMONTH |   |
-.Hour          | DATEPART HOUR  | DATE_PART | HOUR     | EXTRACT   | STRFTIME| Hour      | HOUR       |   |
-.Minute        | DATEPART MINUTE| DATE_PART | MINUTE   | EXTRACT   | STRFTIME| Minute    | MINUTE     |   |
-.Second        | DATEPART SECOND| DATE_PART | SECOND   | EXTRACT   | STRFTIME| Second    | SECOND     |   |
-.AddYears(i)   | DATEADD YEAR   | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
-.AddMonths(i)  | DATEADD MONTH  | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
-.AddDays(f)    | DATEADD DAY    | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
-.AddHours(f)   | DATEADD HOUR   | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
-.AddMinutes(f) | DATEADD MINUTE | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
-.AddSeconds(f) | DATEADD SECOND | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
+| .NET           | MsSqlServer    | PostgreSql| MySql    | Oracle    | SQLite  | MSAccess  | Odbc       | Notes
+|----------------|----------------|-----------|----------|-----------|---------|-----------|------------|-------------------|
+.Date            | CAST(AS DATE)  | DATE_TRUNC| DATE     | TRUNC     | STRFTIME| DateValue(Format)| CONVERT(SQL_DATE)  |   |
+.Year            | YEAR           | DATE_PART | YEAR     | EXTRACT   | STRFTIME| Year      | YEAR       |   |
+.Month           | MONTH          | DATE_PART | MONTH    | EXTRACT   | STRFTIME| Month     | MONTH      |   |
+.Day             | DAY            | DATE_PART | DAY      | EXTRACT   | STRFTIME| Day       | DAYOFMONTH |   |
+.Hour            | DATEPART HOUR  | DATE_PART | HOUR     | EXTRACT   | STRFTIME| Hour      | HOUR       |   |
+.Minute          | DATEPART MINUTE| DATE_PART | MINUTE   | EXTRACT   | STRFTIME| Minute    | MINUTE     |   |
+.Second          | DATEPART SECOND| DATE_PART | SECOND   | EXTRACT   | STRFTIME| Second    | SECOND     |   |
+.Subtract(y).Days | DATEDIFF      | y-x       | DATEDIFF | y-x       | x-y     | DateDiff  | DATEDIFF   |   |
+.Subtract(y).Seconds| TIMESTAMPDIFF| EXTRACT(EPOCH)| TIMESTAMPDIFF| y-x| x-y   | DateDiff  | DATEDIFF   |   |
+.AddYears(i)     | DATEADD YEAR   | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
+.AddMonths(i)    | DATEADD MONTH  | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
+.AddDays(f)      | DATEADD DAY    | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
+.AddHours(f)     | DATEADD HOUR   | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
+.AddMinutes(f)   | DATEADD MINUTE | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
+.AddSeconds(f)   | DATEADD SECOND | + INTERVAL| DATE_ADD | + INTERVAL| DATETIME| DateAdd   |            |   |
 
 AddYears, AddDays and AddMinutes parameter can be either constant or other SQL-column, except in SQLite which supports only constant. 
 AddMonths, AddHours and AddSeconds supports only constants for now. 
@@ -202,24 +258,62 @@ Odbc standard doesn't seem to have a date-add functionality.
 
 #### Numerical Functions (e.g. Microsoft.FSharp.Core.Operators)
 
-| .NET          | MsSqlServer| PostgreSql| MySql   | Oracle| SQLite     | MSAccess| Odbc    |  Notes
-|---------------|------------|-----------|---------|-------|------------|---------|---------|--------------------------|
-abs(i)          | ABS        | ABS       | ABS     | ABS   | ABS        | Abs     | ABS     |   |
-ceil(i)         | CEILING    | CEILING   | CEILING | CEIL  | CAST + 0.5 | Fix+1   | CEILING |   |
-floor(i)        | FLOOR      | FLOOR     | FLOOR   | FLOOR | CAST AS INT| Int     | FLOOR   |   |
-round(i)        | ROUND      | ROUND     | ROUND   | ROUND | ROUND      | Round   | ROUND   |   |
-Math.Round(i,x) | ROUND      | ROUND     | ROUND   | ROUND | ROUND      | Round   | ROUND   |   |
-truncate(i)     | TRUNCATE   | TRUNC     | TRUNCATE| TRUNC |            | Fix     | TRUNCATE|   |
-(+)             | +          | +         | +       | +     | +          | +       | +       |   |
-(-)             | -          | -         | -       | -     | -          | -       | -       |   |
-(*)             | *          | *         | *       | *     | *          | *       | *       |   |
-(/)             | /          | /         | /       | /     | /          | /       | /       |   |
-(%)             | %          | %         | %       | %     | %          | %       | %       |   |
+| .NET          | MsSqlServer| PostgreSql| MySql   | Oracle| SQLite     | MSAccess| Odbc     |  Notes
+|---------------|------------|-----------|---------|-------|------------|---------|----------|-------------------|
+abs(i)          | ABS        | ABS       | ABS     | ABS   | ABS        | Abs     | ABS      |   |
+ceil(i)         | CEILING    | CEILING   | CEILING | CEIL  | CAST + 0.5 | Fix+1   | CEILING  |   |
+floor(i)        | FLOOR      | FLOOR     | FLOOR   | FLOOR | CAST AS INT| Int     | FLOOR    |   |
+round(i)        | ROUND      | ROUND     | ROUND   | ROUND | ROUND      | Round   | ROUND    |   |
+Math.Round(i,x) | ROUND      | ROUND     | ROUND   | ROUND | ROUND      | Round   | ROUND    |   |
+truncate(i)     | TRUNCATE   | TRUNC     | TRUNCATE| TRUNC |            | Fix     | TRUNCATE |   |
+sqrt(i)         | SQRT       | SQRT      | SQRT    | SQRT  | SQRT       | Sqr     | SQRT     |   |
+sin(i)          | SIN        | SIN       | SIN     | SIN   | SIN        | SIN     | SIN      |   |
+cos(i)          | COS        | COS       | COS     | COS   | COS        | COS     | COS      |   |
+tan(i)          | TAN        | TAN       | TAN     | TAN   | TAN        | TAN     | TAN      |   |
+asin(i)         | ASIN       | ASIN      | ASIN    | ASIN  | ASIN       |         | ASIN     |   |
+acos(i)         | ACOS       | ACOS      | ACOS    | ACOS  | ACOS       |         | ACOS     |   |
+atan(i)         | ATAN       | ATAN      | ATAN    | ATAN  | ATAN       | Atn     | ATAN     |   |
+Math.Max(x,y)   | SELECT(MAX) | GREATEST  | GREATEST| GREATEST| MAX      | iif(x>y,x,y)| GREATEST     |   |
+Math.Min(x,y)   | SELECT(MIN) | LEAST     | LEAST   | LEAST | MIN        | iif(x<y,x,y)| LEAST     |   |
+Math.Pow(x,y)   | POWER(x,y) | POWER(x,y) | POWER(x,y) | POWER(x,y) |    | x^y    | POWER(x,y) |   |
+(+)             | +          | +         | +       | +     | +          | +       | +        |   |
+(-)             | -          | -         | -       | -     | -          | -       | -        |   |
+(*)             | *          | *         | *       | *     | *          | *       | *        |   |
+(/)             | /          | /         | /       | /     | /          | /       | /        |   |
+(%)             | %          | %         | %       | %     | %          | %       | %        |   |
+
+Microsoft SQL Server doesn't have Greatest and Least functions, so that will be done via nested SQL clause: (select max(v) from (values (x), (y)) as value(v))
+It might also not be standard ODBC, but should work e.g. on Amazon Redshift.
+
+#### Condition operations and others
+
+| .NET            | MsSqlServer| PostgreSql| MySql    | Oracle   | SQLite   | MSAccess  | Odbc     | Notes
+|-----------------|------------|-----------|----------|----------|----------|-----------|----------|---------------|
+.ToString()       | CAST(NVARCHAR)| ::varchar| CAST(CHAR)| CAST(VARCHAR)| CAST(TEXT)| CStr| CONVERT|   |
+if x then y else z| CASE WHEN  | CASE WHEN | IF(x,y,z)| CASE WHEN| CASE WHEN| iif(x,y,z)| CASE WHEN|   |
+
+If the condition is not using SQL columns, it will be parsed before creation of SQL.
+If the condition is containing columns, it will be parsed into SQL.
+
+If the condition is in the result of projection (the final select clause), 
+it may be parsed after execution of the SQL, depending on parameter setting `selectOperations`.
 
 #### Aggregate Functions 
 
-Also you can use these on group-by clause:
-`COUNT`, `SUM`, `MIN`, `MAX`, `AVG`
+Also you can use these to return an aggregated value, or in a group-by clause:
+
+| .NET          | MsSqlServer| PostgreSql| MySql   | Oracle   | SQLite | MSAccess| Odbc     |  Notes
+|---------------|------------|-----------|---------|----------|--------|---------|----------|--------------------|
+count           | COUNT      | COUNT     | COUNT   | COUNT    | COUNT  | COUNT   | COUNT    |   |
+sum             | SUM        | SUM       | SUM     | SUM      | SUM    | SUM     | SUM      |   |
+min             | MIN        | MIN       | MIN     | MIN      | MIN    | MIN     | MIN      |   |
+max             | MAX        | MAX       | MAX     | MAX      | MAX    | MAX     | MAX      |   |
+average         | AVG        | AVG       | AVG     | AVG      | AVG    | AVG     | AVG      |   |
+StdDev          | STDEV      | STDDEV    | STDDEV  | STDDEV   |        | STDEV   | STDEV    |   |
+Variance        | VAR        | VARIANCE  | VARIANCE| VARIANCE |        | DVAR    | VAR      |   |
+
+`StdDev`, `Variance` are located in FSharp.Data.Sql.Operators namespace and also Seq.stdDevAsync and Seq.varianceAsync.
+Others can be used from List, Seq and Array modules, or Seq.countAsync, Seq.sumAsync, Seq.minAsync, Seq.maxAsync, Seq.averageAsync.
 
 *)
 
@@ -543,3 +637,29 @@ let freightsByCity =
         groupBy o.ShipCity into cites
         select (cites.Key, cites.Sum(fun order -> order.Freight))
     } |> Array.executeQueryAsync
+
+(**
+
+Group-by is support is limited, mostly for single tables only.
+F# Linq query syntax doesnt support doing `select count(1), sum(UnitPrice) from Products`
+but you can group by a constant to get that:
+
+*)
+	
+let qry = 
+	query {
+		for p in dc.Main.Products do
+		groupBy 1 into g
+		select (g.Count(), g.Sum(fun p -> p.UnitPrice))
+	} |> Seq.head
+
+(**
+
+For more info see:
+
+ * [Composable Query](composable.html)
+ * [Mapping to record types](mappers.html)
+ * [CRUD operations](crud.html)
+ * [Sample queries](https://github.com/fsprojects/SQLProvider/blob/master/tests/SqlProvider.Tests/Readme.md)
+
+*)

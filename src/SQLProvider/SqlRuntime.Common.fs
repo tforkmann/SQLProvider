@@ -1,12 +1,14 @@
-﻿namespace FSharp.Data.Sql.Common
+namespace FSharp.Data.Sql.Common
 
 open System
 open System.Collections.Generic
 open System.ComponentModel
 open System.Data
 open System.Data.Common
+open System.IO
 open System.Linq.Expressions
 open System.Reflection
+open System.Text
 open FSharp.Data.Sql
 open FSharp.Data.Sql.Transactions
 open FSharp.Data.Sql.Schema
@@ -53,44 +55,91 @@ type SQLiteLibrary =
     | MicrosoftDataSqlite = 3
 
 module public QueryEvents =
-   open System.Data.SqlClient
-
-   let private expressionEvent = new Event<System.Linq.Expressions.Expression>()
-   
+      
    type SqlEventData = {
+       /// The text of the SQL command being executed.
        Command: string
+
+       /// The parameters (if any) passed to the SQL command being executed.
        Parameters: (string*obj) seq
+
+       /// The SHA256 hash of the UTF8-encoded connection string used to perform this command.
+       /// Use this to determine on which database connection the command is going to be executed.
+       ConnectionStringHash: byte[]      
    }
    with 
       override x.ToString() =
         let paramsString = x.Parameters |> Seq.fold (fun acc (pName, pValue) -> acc + (sprintf "%s - %A; " pName pValue)) ""
-        sprintf "%s - params %s" x.Command paramsString
+        sprintf "%s -- params %s" x.Command paramsString
+      
+      /// Use this to execute similar queries to test the result of the executed query.
+      member x.ToRawSql() =
+        x.Parameters |> Seq.fold (fun (acc:string) (pName, pValue) -> 
+            match pValue with
+            | :? String as pv -> acc.Replace(pName, (sprintf "'%s'" (pv.Replace("'", "''"))))
+            | :? DateTime as pv -> acc.Replace(pName, (sprintf "'%s'" (pv.ToString("yyyy-MM-dd hh:mm:ss"))))
+            | _ -> acc.Replace(pName, (sprintf "%O" pValue))) x.Command
 
    let private sqlEvent = new Event<SqlEventData>()
+   
+   [<CLIEvent>]
+   /// This event fires immediately before the execution of every generated query. 
+   /// Listen to this event to display or debug the content of your queries.
+   let SqlQueryEvent = sqlEvent.Publish
 
+   let private publishSqlQuery = 
+      
+      let connStrHashCache = ConcurrentDictionary<string, byte[]>()
+
+      fun connStr qry parameters ->
+        
+        let hashValue = connStrHashCache.GetOrAdd(connStr, fun str -> Text.Encoding.UTF8.GetBytes(str : string) |> Bytes.sha256)
+
+        sqlEvent.Trigger { Command = qry
+                           ConnectionStringHash = hashValue
+                           Parameters = parameters
+                         }
+
+   let internal PublishSqlQuery connStr qry (spc:IDbDataParameter seq) = 
+      publishSqlQuery connStr qry (spc |> Seq.map(fun p -> p.ParameterName, p.Value))
+
+   let internal PublishSqlQueryCol connStr qry (spc:DbParameterCollection) = 
+      publishSqlQuery connStr qry [ for p in spc -> (p.ParameterName, p.Value) ]
+
+   let internal PublishSqlQueryICol connStr qry (spc:IDataParameterCollection) = 
+      publishSqlQuery connStr qry [ for op in spc do
+                                      let p = op :?> IDataParameter
+                                      yield (p.ParameterName, p.Value)]
+
+
+   let private expressionEvent = new Event<System.Linq.Expressions.Expression>()
+   
    [<CLIEvent>]
    let LinqExpressionEvent = expressionEvent.Publish
 
-   [<CLIEvent>]
-   let SqlQueryEvent = sqlEvent.Publish
+   let internal PublishExpression(e) = expressionEvent.Trigger(e)
 
-   let PublishExpression(e) = expressionEvent.Trigger(e)
-   let PublishSqlQuery qry (spc:IDbDataParameter seq) = sqlEvent.Trigger( {Command = qry; Parameters = spc |> Seq.map(fun p -> p.ParameterName, p.Value) })
-   let PublishSqlQueryCol qry (spc:DbParameterCollection) = 
-        sqlEvent.Trigger( {Command = qry; Parameters = [for p in spc do yield (p.ParameterName, p.Value)] })
-   let PublishSqlQueryICol qry (spc:IDataParameterCollection) = 
-        sqlEvent.Trigger(
-            { Command = qry; 
-              Parameters = [ for op in spc do
-                               let p = op :?> IDataParameter
-                               yield (p.ParameterName, p.Value)] })
-
+   
 type EntityState =
     | Unchanged
     | Created
     | Modified of string list
     | Delete
     | Deleted
+
+type OnConflict = 
+    /// Throws an exception if the primary key already exists (default behaviour).
+    | Throw
+    /// If the primary key already exists, updates the existing row's columns to match the new entity.
+    /// Currently supported only on PostgreSQL 9.5+
+    | Update
+    /// If the primary key already exists, leaves the existing row unchanged.
+    /// Currently supported only on PostgreSQL 9.5+
+    | DoNothing
+
+type MappedColumnAttribute(name: string) = 
+    inherit Attribute()
+    member x.Name with get() = name
 
 [<System.Runtime.Serialization.DataContract(Name = "SqlEntity", Namespace = "http://schemas.microsoft.com/sql/2011/Contracts"); DefaultMember("Item")>]
 type SqlEntity(dc: ISqlDataContext, tableName, columns: ColumnLookup) =
@@ -255,6 +304,11 @@ type SqlEntity(dc: ISqlDataContext, tableName, columns: ColumnLookup) =
         let typ = typeof<'a>
         let propertyTypeMapping = defaultArg propertyTypeMapping snd
         let cleanName (n:string) = n.Replace("_","").Replace(" ","").ToLower()
+        let clean (pi: PropertyInfo) = 
+            match pi.GetCustomAttribute(typeof<MappedColumnAttribute>) with
+            | :? MappedColumnAttribute as attr -> attr.Name
+            | _ -> pi.Name
+            |> cleanName
         let dataMap = x.ColumnValues |> Seq.map (fun (n,v) -> cleanName n, v) |> dict
         if FSharpType.IsRecord typ
         then
@@ -263,7 +317,7 @@ type SqlEntity(dc: ISqlDataContext, tableName, columns: ColumnLookup) =
             let values =
                 [|
                     for prop in fields do
-                        match dataMap.TryGetValue(cleanName prop.Name) with
+                        match dataMap.TryGetValue(clean prop) with
                         | true, data -> yield propertyTypeMapping (prop.Name,data)
                         | false, _ -> ()
                 |]
@@ -271,10 +325,36 @@ type SqlEntity(dc: ISqlDataContext, tableName, columns: ColumnLookup) =
         else
             let instance = Activator.CreateInstance<'a>()
             for prop in typ.GetProperties() do
-                match dataMap.TryGetValue(cleanName prop.Name) with
+                match dataMap.TryGetValue(clean prop) with
                 | true, data -> prop.GetSetMethod().Invoke(instance, [|propertyTypeMapping (prop.Name,data)|]) |> ignore
                 | false, _ -> ()
             instance
+    
+    /// Attach/copy entity to a different data-context.
+    /// Second parameter: SQL UPDATE or INSERT clause?  
+    /// UPDATE: Updates the exising database entity with the values that this entity contains.
+    /// INSERT: Makes a copy of entity (database row), which is a new row with the same columns and values (except Id)
+    member __.CloneTo(secondContext, itemExistsAlready:bool) = 
+        let newItem = SqlEntity(secondContext, tableName, columns)
+        if itemExistsAlready then 
+            newItem.SetData(data |> Seq.map(fun kvp -> kvp.Key, kvp.Value))
+            newItem._State <- Modified (data |> Seq.toList 
+                                             |> List.map(fun kvp -> kvp.Key)
+                                             |> List.filter(fun k -> k <> "Id"))
+        else 
+            newItem.SetData(data 
+                      |> Seq.filter(fun kvp -> kvp.Key <> "Id" && kvp.Value <> null) 
+                      |> Seq.map(fun kvp -> kvp.Key, kvp.Value))
+            newItem._State <- Created
+        newItem
+
+    /// Makes a copy of entity (database row), which is a new row with the same columns and values (except Id)
+    /// If column primaty key is something else and not-auto-generated, then, too bad...
+    member __.Clone() = 
+        __.CloneTo(dc, false)
+
+    /// Determines what should happen when saving this entity if it is newly-created but another entity with the same primary key already exists
+    member val OnConflict = Throw with get, set
 
     interface System.ComponentModel.INotifyPropertyChanged with
         [<CLIEvent>] member __.PropertyChanged = propertyChanged.Publish
@@ -335,6 +415,8 @@ and ISqlDataContext =
     abstract CreateEntity               : string -> SqlEntity
     abstract ReadEntities               : string * ColumnLookup * IDataReader -> SqlEntity[]
     abstract ReadEntitiesAsync          : string * ColumnLookup * DbDataReader -> Async<SqlEntity[]>
+    abstract SqlOperationsInSelect      : SelectOperations
+    abstract SaveContextSchema          : string -> unit
 
 // LinkData is for joins with SelectMany
 and LinkData =
@@ -355,19 +437,7 @@ and GroupData =
       AggregateColumns   : (alias * SqlColumnType) list
       Projection         : Expression option }
 
-and alias = string
 and table = string
-
-and Condition =
-    // this is  (table alias * column name * operator * right hand value ) list  * (the same again list)
-    // basically any AND or OR expression can have N terms and can have N nested condition children
-    // this is largely from my CRM type provider. I don't think in practice for the SQL provider
-    // you will ever have more than what is representable in a traditional binary expression tree, but
-    // changing it would be a lot of effort ;)
-    | And of (alias * SqlColumnType * ConditionOperator * obj option) list * (Condition list) option
-    | Or of (alias * SqlColumnType * ConditionOperator * obj option) list * (Condition list) option
-    | ConstantTrue
-    | ConstantFalse
 
 and SelectData = LinkQuery of LinkData | GroupQuery of GroupData | CrossJoin of alias * Table
 and UnionType = NormalUnion | UnionAll | Intersect | Except
@@ -379,7 +449,7 @@ and internal SqlExp =
     | Projection   of Expression * SqlExp                   // entire LINQ projection expression tree
     | Distinct     of SqlExp                                // distinct indicator
     | OrderBy      of alias * SqlColumnType * bool * SqlExp // alias and column name, bool indicates ascending sort
-    | Union        of UnionType * string * SqlExp           // union type and subquery
+    | Union        of UnionType * string * seq<IDbDataParameter> * SqlExp  // union type and subquery
     | Skip         of int * SqlExp
     | Take         of int * SqlExp
     | Count        of SqlExp
@@ -396,7 +466,7 @@ and internal SqlExp =
                 | OrderBy(_,_,_,rest)
                 | Skip(_,rest)
                 | Take(_,rest)
-                | Union(_,_,rest)
+                | Union(_,_,_,rest)
                 | Count(rest) 
                 | AggregateOp(_,_,rest) -> aux rest
             aux this
@@ -412,7 +482,7 @@ and internal SqlExp =
                 | OrderBy(_,_,_,rest)
                 | Skip(_,rest)
                 | Take(_,rest)
-                | Union(_,_,rest)
+                | Union(_,_,_,rest)
                 | Count(rest) 
                 | AggregateOp(_,_,rest) -> isGroupBy rest
             isGroupBy this
@@ -430,7 +500,7 @@ and internal SqlQuery =
       UltimateChild : (string * Table) option
       Skip          : int option
       Take          : int option
-      Union         : (UnionType*string) option
+      Union         : (UnionType*string*seq<IDbDataParameter>) option
       Count         : bool 
       AggregateOp   : (alias * SqlColumnType) list }
     with
@@ -492,10 +562,10 @@ and internal SqlQuery =
                 | Count(rest) ->
                     if q.Count then failwith "count may only be specified once"
                     else convert { q with Count = true } rest
-                | Union(all,subquery, rest) ->
+                | Union(all,subquery, pars, rest) ->
                     if q.Union.IsSome then failwith "Union may only be specified once. However you can try: xs.Union(ys.Union(zs))"
                     elif q.Take.IsSome then failwith "Union and take-limit is not yet supported as SQL-syntax varies."
-                    else convert { q with Union = Some(all,subquery) } rest
+                    else convert { q with Union = Some(all,subquery,pars) } rest
                 | AggregateOp(alias, operationWithKey, rest) ->
                     convert { q with AggregateOp = (alias, operationWithKey)::q.AggregateOp } rest
             let sq = convert (SqlQuery.Empty) exp
@@ -535,6 +605,8 @@ and internal ISqlProvider =
     abstract GetIndividualsQueryText : Table * int -> string
     /// Returns the db vendor specific SQL query to select a single row based on the table and column name specified
     abstract GetIndividualQueryText : Table * string -> string
+    /// Returns cached schema information, depending on the provider the cached schema may contain the whole database schema or only the schema for entities referenced in the current context
+    abstract GetSchemaCache : unit -> SchemaCache
     /// Writes all pending database changes to database
     abstract ProcessUpdates : IDbConnection * System.Collections.Concurrent.ConcurrentDictionary<SqlEntity,DateTime> * TransactionOptions * Option<int> -> unit
     /// Asynchronously writes all pending database changes to database
@@ -542,36 +614,131 @@ and internal ISqlProvider =
     /// Accepts a SqlQuery object and produces the SQL to execute on the server.
     /// the other parameters are the base table alias, the base table, and a dictionary containing
     /// the columns from the various table aliases that are in the SELECT projection
-    abstract GenerateQueryText : SqlQuery * string * Table * Dictionary<string,ResizeArray<string>>*bool -> string * ResizeArray<IDbDataParameter>
+    abstract GenerateQueryText : SqlQuery * string * Table * Dictionary<string,ResizeArray<ProjectionParameter>> * bool * IDbConnection -> string * ResizeArray<IDbDataParameter>
     ///Builds a command representing a call to a stored procedure
     abstract ExecuteSprocCommand : IDbCommand * QueryParameter[] * QueryParameter[] *  obj[] -> ReturnValueType
     ///Builds a command representing a call to a stored procedure, executing async
     abstract ExecuteSprocCommandAsync : System.Data.Common.DbCommand * QueryParameter[] * QueryParameter[] *  obj[] -> Async<ReturnValueType>
+    ///Provider specific lock to do provider specific locking
+    abstract GetLockObject : unit -> obj
+
+and internal SchemaCache =
+    { PrimaryKeys   : ConcurrentDictionary<string,string list>
+      Tables        : ConcurrentDictionary<string,Table>
+      Columns       : ConcurrentDictionary<string,ColumnLookup>
+      Relationships : ConcurrentDictionary<string,Relationship list * Relationship list>
+      Sprocs        : ResizeArray<Sproc>
+      SprocsParams  : ConcurrentDictionary<string,QueryParameter list> //sproc name and params
+      Packages      : ResizeArray<CompileTimeSprocDefinition>
+      Individuals   : ResizeArray<SqlEntity>
+      IsOffline     : bool }
+    with
+        static member Empty = { 
+            PrimaryKeys = ConcurrentDictionary<string,string list>()
+            Tables = ConcurrentDictionary<string,Table>()
+            Columns = ConcurrentDictionary<string,ColumnLookup>()
+            Relationships = ConcurrentDictionary<string,Relationship list * Relationship list>()
+            Sprocs = ResizeArray()
+            SprocsParams = ConcurrentDictionary<string,QueryParameter list>()
+            Packages = ResizeArray()
+            Individuals = ResizeArray()
+            IsOffline = false }
+        static member Load(filePath) =
+            use ms = new MemoryStream(Encoding.UTF8.GetBytes(File.ReadAllText(filePath)))
+            let ser = new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof<SchemaCache>)
+            { (ser.ReadObject(ms) :?> SchemaCache) with IsOffline = true }
+        static member LoadOrEmpty(filePath) =
+            if String.IsNullOrEmpty(filePath) || (not(System.IO.File.Exists filePath)) then 
+                SchemaCache.Empty
+            else
+                SchemaCache.Load(filePath)
+        member this.Save(filePath) =
+            use ms = new MemoryStream()
+            let ser = new System.Runtime.Serialization.Json.DataContractJsonSerializer(this.GetType())
+            ser.WriteObject(ms, { this with IsOffline = true });  
+            let json = ms.ToArray();  
+            File.WriteAllText(filePath, Encoding.UTF8.GetString(json, 0, json.Length))
 
 /// GroupResultItems is an item to create key-igrouping-structure.
 /// From the select group-by projection, aggregate operations like Enumerable.Count() 
 /// is replaced to GroupResultItems.AggregateCount call and this is used to fetch the 
 /// SQL result instead of actually counting anything
-type GroupResultItems<'key>(keyname:String*String, keyval, distinctItem:SqlEntity) as this =
-    inherit ResizeArray<SqlEntity> ([|distinctItem|]) 
-    new(keyname, keyval, distinctItem:SqlEntity) = GroupResultItems((keyname,""), keyval, distinctItem)
+type GroupResultItems<'key, 'SqlEntity>(keyname:String*String*String*String*String*String*String, keyval, distinctItem:'SqlEntity) as this =
+    inherit ResizeArray<'SqlEntity> ([|distinctItem|]) 
+    new(keyname, keyval, distinctItem:'SqlEntity) = GroupResultItems((keyname,"","","","","",""), keyval, distinctItem)
+    new((k1,k2):String*String, keyval, distinctItem:'SqlEntity) = GroupResultItems((k1, k2,"","","","",""), keyval, distinctItem)
+    new((k1,k2,k3):String*String*String, keyval, distinctItem:'SqlEntity) = GroupResultItems((k1, k2,k3,"","","",""), keyval, distinctItem)
+    new((k1,k2,k3,k4):String*String*String*String, keyval, distinctItem:'SqlEntity) = GroupResultItems((k1, k2,k3,k4,"","",""), keyval, distinctItem)
+    new((k1,k2,k3,k4,k5):String*String*String*String*String, keyval, distinctItem:'SqlEntity) = GroupResultItems((k1, k2,k3,k4,"","",""), keyval, distinctItem)
+    new((k1,k2,k3,k4,k5,k6):String*String*String*String*String*String, keyval, distinctItem:'SqlEntity) = GroupResultItems((k1, k2,k3,k4,k5,k6,""), keyval, distinctItem)
     member private __.fetchItem<'ret> itemType (columnName:Option<string>) =
         let fetchCol =
             match columnName with
-            | None -> fst(keyname).ToUpperInvariant()
+            | None -> (keyname |> fun (x,_,_,_,_,_,_) -> x).ToUpperInvariant()
             | Some c -> c.ToUpperInvariant()
-        let itm =
-            distinctItem.ColumnValues 
-            |> Seq.filter(fun (s,k) -> 
-                let sUp = s.ToUpperInvariant()
-                (sUp.Contains("_"+fetchCol)) && 
-                    (sUp.Contains(itemType+"_"))) |> Seq.head |> snd
+        let itms =
+            match box distinctItem with
+            | :? SqlEntity ->
+                let ent = unbox<SqlEntity> distinctItem
+                ent.ColumnValues 
+                    |> Seq.filter(fun (s,k) -> 
+                        let sUp = s.ToUpperInvariant()
+                        (sUp.Contains("_"+fetchCol) || columnName.IsNone) && 
+                            (sUp.Contains(itemType+"_")))
+            | :? Tuple<SqlEntity,SqlEntity> ->
+                let ent1, ent2 = unbox<SqlEntity*SqlEntity> distinctItem
+                Seq.concat [| ent1.ColumnValues; ent2.ColumnValues; |]
+                    |> Seq.distinct |> Seq.filter(fun (s,k) -> 
+                        let sUp = s.ToUpperInvariant()
+                        (sUp.Contains("_"+fetchCol) || columnName.IsNone) && 
+                            (sUp.Contains(itemType+"_")))
+            | :? Tuple<SqlEntity,SqlEntity,SqlEntity> ->
+                let ent1, ent2, ent3 = unbox<SqlEntity*SqlEntity*SqlEntity> distinctItem
+                Seq.concat [| ent1.ColumnValues; ent2.ColumnValues; ent3.ColumnValues;|]
+                    |> Seq.distinct |> Seq.filter(fun (s,k) -> 
+                        let sUp = s.ToUpperInvariant()
+                        (sUp.Contains("_"+fetchCol) || columnName.IsNone) && 
+                            (sUp.Contains(itemType+"_")))
+            | :? Tuple<SqlEntity,SqlEntity,SqlEntity,SqlEntity> ->
+                let ent1, ent2, ent3, ent4 = unbox<SqlEntity*SqlEntity*SqlEntity*SqlEntity> distinctItem
+                Seq.concat [| ent1.ColumnValues; ent2.ColumnValues; ent3.ColumnValues;ent4.ColumnValues;|]
+                    |> Seq.distinct |> Seq.filter(fun (s,k) -> 
+                        let sUp = s.ToUpperInvariant()
+                        (sUp.Contains("_"+fetchCol) || columnName.IsNone) && 
+                            (sUp.Contains(itemType+"_")))
+            | :? Microsoft.FSharp.Linq.RuntimeHelpers.AnonymousObject<SqlEntity,SqlEntity> ->
+                let ent = unbox<Microsoft.FSharp.Linq.RuntimeHelpers.AnonymousObject<SqlEntity,SqlEntity>> distinctItem
+                Seq.concat [| ent.Item1.ColumnValues; ent.Item2.ColumnValues; |]
+                    |> Seq.distinct |> Seq.filter(fun (s,k) -> 
+                        let sUp = s.ToUpperInvariant()
+                        (sUp.Contains("_"+fetchCol) || columnName.IsNone) && 
+                            (sUp.Contains(itemType+"_")))
+            | :? Microsoft.FSharp.Linq.RuntimeHelpers.AnonymousObject<SqlEntity,SqlEntity,SqlEntity> ->
+                let ent = unbox<Microsoft.FSharp.Linq.RuntimeHelpers.AnonymousObject<SqlEntity,SqlEntity,SqlEntity>> distinctItem
+                Seq.concat [| ent.Item1.ColumnValues; ent.Item2.ColumnValues; ent.Item3.ColumnValues; |]
+                    |> Seq.distinct |> Seq.filter(fun (s,k) -> 
+                        let sUp = s.ToUpperInvariant()
+                        (sUp.Contains("_"+fetchCol) || columnName.IsNone) && 
+                            (sUp.Contains(itemType+"_")))
+            | :? Microsoft.FSharp.Linq.RuntimeHelpers.AnonymousObject<SqlEntity,SqlEntity,SqlEntity,SqlEntity> ->
+                let ent = unbox<Microsoft.FSharp.Linq.RuntimeHelpers.AnonymousObject<SqlEntity,SqlEntity,SqlEntity,SqlEntity>> distinctItem
+                Seq.concat [| ent.Item1.ColumnValues; ent.Item2.ColumnValues; ent.Item3.ColumnValues; ent.Item4.ColumnValues; |]
+                    |> Seq.distinct |> Seq.filter(fun (s,k) -> 
+                        let sUp = s.ToUpperInvariant()
+                        (sUp.Contains("_"+fetchCol) || columnName.IsNone) && 
+                            (sUp.Contains(itemType+"_")))
+            | _ -> failwith ("Unknown aggregate item: " + typeof<'SqlEntity>.Name)
+        let itm = 
+            if Seq.isEmpty itms then
+                let cols = (keyname |> fun (x1,x2,x3,x4,x5,x6,x7) -> x1 + " " + x2+ " " + x3 + " " + x4 + " " + x5 + " " + x6 + " " + x7).Trim()
+                failwithf "Unsupported aggregate: %s %s" cols (if columnName.IsSome then columnName.Value else "")
+            else itms |> Seq.head |> snd
         if itm = box(DBNull.Value) then Unchecked.defaultof<'ret>
         else 
             let returnType = typeof<'ret>
             Utilities.convertTypes itm returnType :?> 'ret
     member __.Values = [|distinctItem|]
-    interface System.Linq.IGrouping<'key, SqlEntity> with
+    interface System.Linq.IGrouping<'key, 'SqlEntity> with
         member __.Key = keyval
     member __.AggregateCount<'T>(columnName) = this.fetchItem<'T> "COUNT" columnName
     member __.AggregateSum<'T>(columnName) = 
@@ -581,6 +748,17 @@ type GroupResultItems<'key>(keyname:String*String, keyval, distinctItem:SqlEntit
     member __.AggregateAvg<'T>(columnName) = this.fetchItem<'T> "AVG" columnName
     member __.AggregateMin<'T>(columnName) = this.fetchItem<'T> "MIN" columnName
     member __.AggregateMax<'T>(columnName) = this.fetchItem<'T> "MAX" columnName
+    member __.AggregateStandardDeviation<'T>(columnName) = this.fetchItem<'T> "STDDEV" columnName
+    member __.AggregateStDev<'T>(columnName) = this.fetchItem<'T> "STDDEV" columnName
+    member __.AggregateStdDev<'T>(columnName) = this.fetchItem<'T> "STDDEV" columnName
+    member __.AggregateVariance<'T>(columnName) = this.fetchItem<'T> "VAR" columnName
+    static member op_Implicit(x:GroupResultItems<'key, 'SqlEntity>) : Microsoft.FSharp.Linq.RuntimeHelpers.Grouping<'key, 'SqlEntity> =
+        Microsoft.FSharp.Linq.RuntimeHelpers.Grouping((x :> System.Linq.IGrouping<_,_>).Key, x.Values)
+    static member op_Implicit(x:Microsoft.FSharp.Linq.RuntimeHelpers.Grouping<'key, 'SqlEntity>) : GroupResultItems<'key, 'SqlEntity> =
+        let key = x.GetType().GetField("key", BindingFlags.NonPublic ||| BindingFlags.Instance)
+        let v = key.GetValue(x) |> unbox<'key>
+        let i = x |> Seq.head
+        GroupResultItems<'key, 'SqlEntity>("", v, i)
 
 module internal CommonTasks =
 
@@ -618,3 +796,40 @@ module internal CommonTasks =
                         Condition.Or(curr, tail |> Option.map parseFilters)
                     | x -> x)
             parseFilters conditionList
+
+module public OfflineTools =
+
+    /// Merges two ContexSchemaPath offline schema files into one target schema file.
+    /// This is a tool method that can be useful in multi-project solution using the same database with different tables.
+    let mergeCacheFiles(sourcefile1, sourcefile2, targetfile) =
+        if not(System.IO.File.Exists sourcefile1) then "File not found: " + sourcefile1
+        elif not(System.IO.File.Exists sourcefile2) then "File not found: " + sourcefile2
+        else
+        if System.IO.File.Exists targetfile then
+            System.IO.File.Delete targetfile
+        let s1 = SchemaCache.Load sourcefile1
+        let s2 = SchemaCache.Load sourcefile2
+        let merged = 
+            {   PrimaryKeys = System.Collections.Concurrent.ConcurrentDictionary( 
+                                Seq.concat [|s1.PrimaryKeys ; s2.PrimaryKeys |] |> Seq.distinctBy(fun d -> d.Key));
+                Tables = System.Collections.Concurrent.ConcurrentDictionary( 
+                                Seq.concat [|s1.Tables ; s2.Tables |] |> Seq.distinctBy(fun d -> d.Key));
+                Columns = System.Collections.Concurrent.ConcurrentDictionary( 
+                                Seq.concat [|s1.Columns ; s2.Columns |] |> Seq.distinctBy(fun d -> d.Key));
+                Relationships = System.Collections.Concurrent.ConcurrentDictionary( 
+                                    Seq.concat [|s1.Relationships ; s2.Relationships |] |> Seq.distinctBy(fun d -> d.Key));
+                Sprocs = ResizeArray(Seq.concat [| s1.Sprocs ; s2.Sprocs |] |> Seq.distinctBy(fun s ->
+                                        let rec getName = 
+                                            function
+                                            | Root(name, sp) -> name + "_" + (getName sp)
+                                            | Package(n, ctpd) -> n + "_" + ctpd.ToString()
+                                            | Sproc ctpd -> ctpd.ToString()
+                                            | Empty -> ""
+                                        getName s));
+                SprocsParams = System.Collections.Concurrent.ConcurrentDictionary( 
+                                Seq.concat [|s1.SprocsParams ; s2.SprocsParams |] |> Seq.distinctBy(fun d -> d.Key));
+                Packages = ResizeArray(Seq.concat [| s1.Packages ; s2.Packages |] |> Seq.distinctBy(fun s -> s.ToString()));
+                Individuals = ResizeArray(Seq.concat [| s1.Individuals ; s2.Individuals |] |> Seq.distinct);
+                IsOffline = s1.IsOffline || s2.IsOffline}
+        merged.Save targetfile
+        "Merge saved " + targetfile + " at " + DateTime.Now.ToString("hh:mm:ss")
